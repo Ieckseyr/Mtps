@@ -11,10 +11,6 @@ namespace mtps {
 // 出生流程是否已完成（对应日志里的 Player Spawned）
 inline bool isPlayerSpawned(::Player const& player) { return player.mIsInitialSpawnDone; }
 
-// 以 Owner 权限执行一条原版命令（主线程调用; 维度决定命令上下文）。
-// 转服、常加载区域这类只能靠原版命令完成的操作都走这里。
-bool runServerCommand(int dimid, std::string const& cmd, bool suppressOutput = true);
-
 // 传送; 出生流程未完成时返回 false 且不做任何动作（调用方负责提示或稍后重试）
 bool teleportPlayerIfReady(::Player& player, ::Vec3 const& pos, ::DimensionType dim);
 

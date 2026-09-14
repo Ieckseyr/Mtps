@@ -1,5 +1,5 @@
-﻿// RandomTeleport.cpp - 随机传送（四级数据源 + 引擎 TickingArea 兜底版）
-// 会话状态机: 随机选点 → 判定落点 chunk（内存 → 落点预计算表 → 存档直读 → tickingarea 生成）
+﻿// RandomTeleport.cpp - 随机传送（四级数据源 + 区块视野兜底版）
+// 会话状态机: 随机选点 → 判定落点 chunk（内存 → 落点预计算表 → 存档直读 → ChunkViewSource 生成）
 // → 整 chunk 无安全列则按 chunk 粒度扩圈(1~24) → 全失败换点重来(最多 6 次) → 仍失败退款。
 // 演进过程与各数据源的取舍见 README「随机传送怎么找安全落点」。
 #include "RandomTeleportInternal.h"
@@ -28,11 +28,6 @@
 #include <mc/world/level/chunk/LevelChunk.h>
 #include <mc/world/level/chunk/ChunkState.h>
 #include <mc/world/level/ChunkPos.h>
-#include <mc/world/level/ticking/ITickingArea.h>
-#include <mc/world/level/ticking/PendingArea.h>
-#include <mc/world/level/ticking/TickingAreaDescription.h>
-#include <mc/world/level/ticking/TickingAreaList.h>
-#include <mc/world/level/ticking/TickingAreasManager.h>
 #include <mc/deps/core/math/Vec3.h>
 #include <mc/network/packet/SetTitlePacket.h>
 #include <mc/network/packet/SetTitlePacketPayload.h>
@@ -92,8 +87,7 @@ RandomTeleport& RandomTeleport::getInstance() {
     return instance;
 }
 
-// 常加载区域（TickingArea）: 引擎原生的"无玩家强制加载区块"机制
-// 走 /tickingarea 命令的完整原生路径（Bounds 构造/激活/持久化全在引擎内）。
+// 区块视野: 见 ChunkViewUtil.cpp（ChunkViewSource 原生加载/生成, 换点只需 move）。
 
 // 玩家名 + 全局序号 → 合法区域名（命令字符串参数, 只留字母数字下划线; 序号保证永不重名）
 struct Offset { int dx, dz; };
@@ -142,7 +136,7 @@ struct RandomTeleport::Session {
     std::unordered_set<std::string> dangerShortSet; // 短名（无前缀, 存档 palette 用）
 
     // 状态机: PROBE(三级数据源探测) → SCAN_CHUNK(落点 chunk 全列扫) → EXPAND(扩圈)
-    //         PROBE miss → LOAD_CHUNK(TickingArea 生成等待) → SCAN_CHUNK
+    //         PROBE miss → LOAD_CHUNK(区块视野生成等待) → SCAN_CHUNK
     enum State { PROBE, LOAD_CHUNK, SCAN_CHUNK, EXPAND } state{PROBE};
     int  chunkWait{0};   // 生成路径: 单落点区块等待计数
     int  totalTicks{0};  // 会话总 tick（总超时兜底）
@@ -151,13 +145,13 @@ struct RandomTeleport::Session {
     int  expandRing{0};  // 扩圈当前半径（chunk; 1..24）
     int  expandIdx{0};   // 圈内周界游标
 
-    // 常加载区域状态（生成路径专用; 存档路径会话全程 areaValid=false）
-    std::string areaName;  // "mtpsrtp_<玩家名>_<序号>"（全局唯一, 永不重名）
-    int         areaDim{-1};
-    int         areaCX{0}, areaCZ{0};  // 中心（方块坐标）
-    int         areaRadius{0};          // 半径（区块）
-    bool        areaValid{false};
-    // 传送成功后不立刻撤区域: 宽限期交给 GraceArea 队列处理（见 cleanupSessionArea）
+    // 区块视野状态（生成路径专用; 存档路径会话全程 viewValid=false）
+    std::shared_ptr<ChunkView> view;   // 持有 = 引擎持续加载/生成覆盖范围内的区块
+    int         viewDim{-1};
+    int         viewCX{0}, viewCZ{0};  // 中心（方块坐标）
+    int         viewRadius{0};          // 半径（方块）
+    bool        viewValid{false};
+    // 传送成功后不立刻释放视野: 宽限期交给 GraceArea 队列处理（见 cleanupSessionArea）
     bool        keepAreaAfterTeleport{false};
     int         spawnWaitTicks{0};   // 等待玩家出生流程完成的 tick 数（见 stepSession 开头）
 
@@ -178,63 +172,51 @@ static int64_t msSince(std::chrono::steady_clock::time_point t0) {
 
 static std::mt19937_64& rng() { static std::mt19937_64 r{std::random_device{}()}; return r; }
 
-// 常加载区域管理（成员: 需要读写 Session 私有字段）
+// 区块视野管理（成员: 需要读写 Session 私有字段）
 
-// 确保会话的常加载区域覆盖 (blockX, blockZ) 为中心、radiusChunks 为半径的圆
-// 区域名每次换区都带新序号 → 撤旧建新（同 tick）不会名字冲突
-void RandomTeleport::ensureTickingArea(Session& s, Level& level, int blockX, int blockZ, int radiusChunks) {
-    if (s.areaValid && s.areaDim == s.dimid && s.areaRadius == radiusChunks
-        && s.areaCX == blockX && s.areaCZ == blockZ) {
-        return; // 已就位
+// 确保会话的区块视野覆盖 (blockX, blockZ) 为中心、radiusChunks 为半径的区域。
+// 换点只 move（不重建）, 引擎随后按常规流程加载/生成; 是否就绪由调用方轮询 chunkStateAt。
+void RandomTeleport::ensureChunkView(Session& s, int blockX, int blockZ, int radiusChunks) {
+    int const radiusBlocks = radiusChunks * 16;
+    if (s.viewValid && s.viewDim == s.dimid && s.viewRadius == radiusBlocks
+        && s.viewCX == blockX && s.viewCZ == blockZ) {
+        return;   // 已就位
     }
-    if (s.areaValid) removeRtpArea(level, s.areaDim, s.areaName); // 换点/重随: 先撤旧区域
-
-    s.areaName = makeAreaName(s.playerName); // 新序号名（永不重名, 无冲突窗口）
-    // circle 的 Y 只影响 tick 的子区块层, 不影响整列区块加载, 取各维度都合法的 64
-    std::string cmd = "tickingarea add circle " + std::to_string(blockX) + " 64 " + std::to_string(blockZ)
-                    + " " + std::to_string(radiusChunks) + " " + s.areaName;
-    bool ok = rtpRunCommand(level, cmd, s.dimid);
-    if (!ok) { // 极端兜底: 三维度全清一遍再试（理论上序号名不会冲突, 防其他意外）
-        for (int d = 0; d < 3; d++) removeRtpArea(level, d, s.areaName);
-        ok = rtpRunCommand(level, cmd, s.dimid);
+    if (!s.viewValid) {
+        s.view = chunkViewCreate(s.dimid);
+        if (!s.view) {
+            rtpLogger().warn("[RTP] 区块视野创建失败（dim={}）, 本次传送可能超时", s.dimid);
+            return;
+        }
+        s.viewValid = true;
     }
-    if (ok) {
-        s.areaValid  = true;
-        s.areaDim    = s.dimid;
-        s.areaRadius = radiusChunks;
-        s.areaCX     = blockX;
-        s.areaCZ     = blockZ;
-        RTP_DBG("[RTP][区域] 创建 circle r={} 区块 @({}, {}) dim={} 名={}",
-                radiusChunks, blockX, blockZ, s.dimid, s.areaName);
-    } else {
-        rtpLogger().warn("[RTP] 常加载区域创建失败: {} （本次传送可能超时）", cmd);
-    }
+    if (!chunkViewMove(*s.view, blockX, blockZ, radiusBlocks)) return;
+    s.viewDim    = s.dimid;
+    s.viewCX     = blockX;
+    s.viewCZ     = blockZ;
+    s.viewRadius = radiusBlocks;
 }
 
-// 会话收尾: 移除常加载区域（结束/超时/离线/作废/关服统一走这里）。
-// 传送成功后不能立刻撤: 靠本区域才加载的地块, 同 tick 撤掉会让客户端收不到区块数据（灰屏）,
-// 所以留 RTP_AREA_GRACE_TICKS 宽限期等玩家视野接管。
+// 会话收尾: 处理区块视野（结束/超时/离线/作废/关服统一走这里）。
+// 传送成功后不能立刻释放: 那块地若靠本视野才加载, 同 tick 释放会让客户端收不到区块数据
+// （灰屏）, 所以留 RTP_VIEW_GRACE_TICKS 宽限期等玩家自己的视野接管。
 void RandomTeleport::cleanupSessionArea(Session& s) {
-    if (!s.areaValid) return;
-    s.areaValid = false;
-    auto level = ll::service::getLevel();
-    if (!level) return; // 关服末期拿不到 Level: 残留区域由下次启动的前缀清理兜底
-
-    if (s.keepAreaAfterTeleport) {
-        scheduleAreaRemoval(s.areaName, s.areaDim, RTP_AREA_GRACE_TICKS,
-                            s.areaCX >> 4, s.areaCZ >> 4);
-        RTP_DBG("[RTP][区域] 传送成功, {} 保留 {} tick 宽限期 (dim={})",
-                s.areaName, RTP_AREA_GRACE_TICKS, s.areaDim);
+    if (!s.viewValid) return;
+    s.viewValid = false;
+    if (s.keepAreaAfterTeleport && s.view) {
+        scheduleViewRelease(std::move(s.view), s.viewDim, RTP_VIEW_GRACE_TICKS,
+                            s.viewCX >> 4, s.viewCZ >> 4);
+        RTP_DBG("[RTP][视野] 传送成功, 保留 {} tick 宽限期 (dim={})", RTP_VIEW_GRACE_TICKS, s.viewDim);
         return;
     }
-    removeRtpArea(*level, s.areaDim, s.areaName);
-    RTP_DBG("[RTP][区域] 会话结束, 移除 {} (dim={})", s.areaName, s.areaDim);
+    s.view.reset();
+    RTP_DBG("[RTP][视野] 会话结束, 释放视野 (dim={})", s.viewDim);
 }
 
-// 宽限期待撤区域
-void RandomTeleport::scheduleAreaRemoval(std::string const& name, int dim, int delayTicks,
+// 宽限期待释放的视野
+void RandomTeleport::scheduleViewRelease(std::shared_ptr<ChunkView> view, int dim, int delayTicks,
                                          int landingCX, int landingCZ) {
-    mGraceAreas.push_back(GraceArea{name, dim, mTickCounter + delayTicks, landingCX, landingCZ});
+    mGraceAreas.push_back(GraceArea{std::move(view), dim, mTickCounter + delayTicks, landingCX, landingCZ, false});
 }
 
 void RandomTeleport::processGraceAreas() {
@@ -244,14 +226,14 @@ void RandomTeleport::processGraceAreas() {
         if (mTickCounter < it->removeAtTick) { ++it; continue; }
 
         if (!it->removed) {
-            if (level) removeRtpArea(*level, it->dim, it->name);
-            it->removed       = true;
-            it->removeAtTick  = mTickCounter + 20;   // 撤完再等 20 tick 做自检
+            it->view.reset();                        // 释放视野 → 区块交还引擎按常规规则卸载
+            it->removed      = true;
+            it->removeAtTick = mTickCounter + 20;    // 释放后再等 20 tick 做自检
             ++it;
             continue;
         }
 
-        // 自检: 区域撤掉之后, 落点区块还应该是 Loaded（说明玩家自己的视野已经接管了它）。
+        // 自检: 视野释放之后, 落点区块还应该是 Loaded（说明玩家自己的视野已经接管了它）。
         // 若这里读到 Unloaded, 就是"传送后一片灰"的病态情况仍然存在 —— 这条日志是
         // 判断根因是否真的修掉的关键证据（debug 开启时输出）。
         if (level) {
@@ -268,14 +250,13 @@ void RandomTeleport::processGraceAreas() {
     }
 }
 
-// 落点是否已被会话的常加载区域覆盖
-// 区域是圆的, 所以按欧氏距离比。用切比雪夫（取 dx/dz 最大值）测的是正方形,
-// 正方形面积大于圆, 角落处会把圆外的方块判成"已覆盖" —— 那正是我们不想漏判的方向。
-bool RandomTeleport::areaCoversLanding(Session const& s, SafePos const& p) {
-    if (!s.areaValid || s.areaDim != p.dimid) return false;
-    int const dx = ((int)std::floor(p.x) >> 4) - (s.areaCX >> 4);
-    int const dz = ((int)std::floor(p.z) >> 4) - (s.areaCZ >> 4);
-    return dx * dx + dz * dz <= s.areaRadius * s.areaRadius;
+// 落点是否已被会话的区块视野覆盖（视野是方形, 这里按欧氏距离判, 偏保守:
+// 角落会判成"没覆盖"从而多 move 一次, 不会漏判）
+bool RandomTeleport::viewCoversLanding(Session const& s, SafePos const& p) {
+    if (!s.viewValid || s.viewDim != p.dimid) return false;
+    double const dx = p.x - (double)s.viewCX;
+    double const dz = p.z - (double)s.viewCZ;
+    return dx * dx + dz * dz <= (double)s.viewRadius * (double)s.viewRadius;
 }
 
 // 发起
@@ -385,16 +366,14 @@ void RandomTeleport::pickNewTarget(Session& s) {
 void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos const* pos) {
     s.finished = true;
     if (success && pos) {
-        // 落点可能落在区域覆盖范围之外（扩圈命中时离圆心最多 24 chunk）: 那块地没有任何
-        // 加载引用, 玩家会直接落在未加载区域。补一个以落点为中心的区域, 让引擎立刻开始加载。
-        auto level = ll::service::getLevel();
-        if (level && !areaCoversLanding(s, *pos)) {
-            ensureTickingArea(s, *level, (int)std::floor(pos->x), (int)std::floor(pos->z),
-                              RTP_AREA_RADIUS_CHUNKS);
-            RTP_DBG("[RTP][区域] 落点在原区域外, 改挂到落点 ({}, {})",
+        // 落点可能落在视野覆盖范围之外（扩圈命中时离中心最多 24 chunk）: 那块地没有加载
+        // 引用, 玩家会直接落在未加载区域。把视野移到落点, 让引擎立刻开始加载。
+        if (!viewCoversLanding(s, *pos)) {
+            ensureChunkView(s, (int)std::floor(pos->x), (int)std::floor(pos->z), RTP_VIEW_RADIUS_CHUNKS);
+            RTP_DBG("[RTP][视野] 落点在视野外, 改挂到落点 ({}, {})",
                     (int)std::floor(pos->x), (int)std::floor(pos->z));
         }
-        s.keepAreaAfterTeleport = true;   // 区域撤离交给宽限期（见 cleanupSessionArea）
+        s.keepAreaAfterTeleport = true;   // 视野释放交给宽限期（见 cleanupSessionArea）
         if (!teleportPlayerIfReady(p, Vec3((float)pos->x, (float)pos->y, (float)pos->z),
                                    (::DimensionType)pos->dimid)) {
             // 正常不会走到这（会话推进前已等出生完成）; 真发生说明出生流程异常
@@ -446,15 +425,15 @@ RandomTeleport::StepResult RandomTeleport::stepProbe(Session& s, Level& level, P
             return StepResult::Progress;
         case ChunkVerdict::NoData:
         default:
-            RTP_DBG("[RTP][探测] #{} ({},{}) {} → TickingArea 生成兜底",
+            RTP_DBG("[RTP][探测] #{} ({},{}) {} → 区块视野生成兜底",
                     s.triedTargets.size(), s.randomX, s.randomZ, reason);
-            ensureTickingArea(s, level, s.randomX, s.randomZ, RTP_AREA_RADIUS_CHUNKS);
+            ensureChunkView(s, s.randomX, s.randomZ, RTP_VIEW_RADIUS_CHUNKS);
             s.state = Session::LOAD_CHUNK;
             return StepResult::Waiting; // 生成中, 下 tick 轮询
     }
 }
 
-// 等 TickingArea 把区块推到就绪, 就绪后转去判定
+// 等区块视野把区块推到就绪, 就绪后转去判定
 RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& level, Player& p, Dimension& dim) {
     s.chunkWait++;
     if (s.chunkWait > RTP_CHUNK_WAIT_TICKS) {
@@ -487,7 +466,7 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
             }
         }
 
-        ensureTickingArea(s, level, s.randomX, s.randomZ, RTP_AREA_RADIUS_CHUNKS); // 区域兜底（正常已就位）
+        ensureChunkView(s, s.randomX, s.randomZ, RTP_VIEW_RADIUS_CHUNKS); // 视野兜底（正常已就位）
         if (s.chunkWait % 20 == 1) {
             RTP_DBG("[RTP][等待] #{} ({},{}) 第{}tick 状态={}",
                     s.triedTargets.size(), s.randomX, s.randomZ, s.chunkWait,
@@ -528,7 +507,7 @@ RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, 
     auto& ring = expandRing(s.expandRing);
     int expensive = 0;  // 本 tick 内存扫描 + 存档直读次数（预算控制）
     int cheapCnt  = 0;  // 本 tick 落点表命中次数（独立、宽得多的预算）
-    int pending = 0;    // TickingArea 区内未就绪 chunk 数（等生成, 不耗预算）
+    int pending = 0;    // 视野区内未就绪 chunk 数（等生成, 不耗预算）
     int missed  = 0;    // 区外无数据 chunk 数（跳过）
     int i = s.expandIdx;
     for (; i < (int)ring.size(); i++) {
@@ -536,8 +515,8 @@ RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, 
         if (cheapCnt >= RTP_TABLE_CHUNKS_PER_TICK) break;
         int ccx = (s.randomX >> 4) + ring[i].dx;
         int ccz = (s.randomZ >> 4) + ring[i].dz;
-        // TickingArea 区内（r ≤ 区域半径）但未就绪: 等生成后重扫
-        bool inArea = s.areaValid && s.expandRing <= RTP_AREA_RADIUS_CHUNKS;
+        // 视野区内（r ≤ 视野半径）但未就绪: 等生成后重扫
+        bool inArea = s.viewValid && s.expandRing <= RTP_VIEW_RADIUS_CHUNKS;
         if (inArea && !isChunkReady(dim, ccx << 4, ccz << 4)) { pending++; continue; }
         // 判定（内部三源逐级: 内存优先 → 落点表 → 存档直读; 查不到 = 未生成的 chunk）
         SafePos     pos{};
@@ -632,14 +611,14 @@ RandomTeleport::StepResult RandomTeleport::stepSession(Session& s) {
 // 调度（多会话轮流推进, 单会话限步数）
 void RandomTeleport::tick() {
     mTickCounter++;
-    // 首个 tick: 清理上次运行崩溃/异常残留的常加载区域（持久化区域重启会被引擎预加载, 必须兜底）
+    // 首个 tick: 清理旧版本用 /tickingarea 生成、残留在存档里的常加载区域
     static bool sPurged = false;
     if (!sPurged) {
         sPurged = true;
         auto level = ll::service::getLevel();
-        if (level) purgeStaleRtpAreas(*level);
+        if (level) purgeLegacyTickingAreas(*level);
     }
-    processGraceAreas();   // 传送成功后保留的常加载区域: 宽限期到就撤
+    processGraceAreas();   // 传送成功后保留的视野: 宽限期到就释放
     // 时间预算: 按会话数平分, 每个会话至少允许推进一步（否则会被饿死）。
     // 外层还有一道总闸: 会话多的时候"平分"会让总时间超过预算, 所以总耗时到上限就停。
     auto const tickStart    = std::chrono::steady_clock::now();
@@ -671,20 +650,11 @@ void RandomTeleport::tick() {
     }
 }
 
-// 停止全部会话（玩家全程在原地; 常加载区域一并移除, 关服时防止持久化残留）
+// 停止全部会话（玩家全程在原地; 区块视野一并释放, 关服时不留下任何加载引用）
 void RandomTeleport::stopAll() {
-    auto level = ll::service::getLevel();
-    for (auto& s : mSessions) {
-        if (s->areaValid) {
-            s->areaValid = false;
-            if (level) removeRtpArea(*level, s->areaDim, s->areaName);
-        }
-    }
+    for (auto& s : mSessions) s->view.reset();
     mSessions.clear();
-    // 宽限期待撤的区域也要清掉, 否则它们会被持久化、下次启动才被前缀清理扫到
-    if (level) {
-        for (auto& ga : mGraceAreas) removeRtpArea(*level, ga.dim, ga.name);
-    }
+    for (auto& ga : mGraceAreas) ga.view.reset();
     mGraceAreas.clear();
 }
 

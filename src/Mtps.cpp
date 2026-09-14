@@ -368,7 +368,7 @@ bool Mtps::enable() {
     papi::registerAll();
     getSelf().getLogger().info("PAPI: {}", papi::statusText());
 
-    getSelf().getLogger().info("Mtps C++ 版已启用（随机传送三级数据源: 内存/存档直读/TickingArea 生成兜底）");
+    getSelf().getLogger().info("Mtps C++ 版已启用（随机传送四级数据源: 内存/落点表/存档直读/区块视野生成）");
     mEnabled = true;
     return true;
 }
