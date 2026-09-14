@@ -1,0 +1,6 @@
+# 源码统一 LF, 避免混合行尾把按行/边界处理源码的工具弄错
+*.cpp text eol=lf
+*.h   text eol=lf
+*.lua text eol=lf
+*.md  text eol=lf
+*.json text eol=lf

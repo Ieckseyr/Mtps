@@ -1,0 +1,21 @@
+# 构建产物与本地缓存（源码仓库不跟踪这些，请自行 xmake build）
+/build/
+/bin/
+/.xmake/
+*.dll
+*.pdb
+*.obj
+*.lib
+*.exp
+*.old
+*.zip
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# 临时验证脚本
+.tmp_*/

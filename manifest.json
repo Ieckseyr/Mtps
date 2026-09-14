@@ -1,0 +1,12 @@
+﻿{
+  "name": "Mtps",
+  "entry": "Mtps.dll",
+  "version": "26.40.1",
+  "type": "native",
+  "description": "Mtps传送系统by伊希娅(定制可加Q:3529832433)",
+  "dependencies": [
+    {
+      "name": "HologramLib"
+    }
+  ]
+}
