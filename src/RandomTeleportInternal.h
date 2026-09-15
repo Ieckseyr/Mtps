@@ -1,6 +1,6 @@
 ﻿#pragma once
 // RandomTeleport 内部共享声明: 会话状态机(RandomTeleport.cpp)、地表扫描(SurfaceScan.cpp)、
-// 区块视野(ChunkViewUtil.cpp) 三个文件共用的常量/类型/辅助函数, 免得各自复制一份。
+// 区块加载(ChunkLoadUtil.cpp) 三个文件共用的常量/类型/辅助函数, 免得各自复制一份。
 #include "BedrockLevelReader.h"
 #include "RandomTeleport.h"
 
@@ -25,12 +25,13 @@ namespace mtps {
 inline constexpr int RTP_CHUNK_WAIT_TICKS      = 200;   // 生成路径: 单落点区块等待上限（tick）
 inline constexpr int RTP_SESSION_TIMEOUT_TICKS = 1200;  // 会话总超时（tick）
 inline constexpr int RTP_STEPS_PER_TICK        = 8;     // 单会话每 tick 最多连续推进步数
-inline constexpr int RTP_VIEW_RADIUS_CHUNKS    = 4;     // 区块视野半径（区块）
+inline constexpr int RTP_LOAD_RADIUS_CHUNKS    = 4;     // 主动请求生成的扩圈范围（区块）
 inline constexpr int RTP_EXPAND_MAX_RING       = 24;    // 扩圈上限（区块）
 inline constexpr int RTP_SCAN_CHUNKS_PER_TICK  = 6;     // 每 tick 最多"内存扫/存档直读"的区块数
 inline constexpr int RTP_TICK_BUDGET_MS        = 4;     // 每 tick 总时间预算（毫秒, 按会话平分）
 inline constexpr int RTP_TABLE_CHUNKS_PER_TICK = 256;   // 每 tick 最多走落点表（零 IO）的区块数
-inline constexpr int RTP_VIEW_GRACE_TICKS       = 200;   // 传送成功后视野的宽限保留时长（tick）
+inline constexpr int RTP_VIEW_GRACE_TICKS       = 200;   // 传送成功后落点区块的宽限保持时长（tick）
+inline constexpr int RTP_LOAD_PUMP_TICKS       = 20;    // 同一区块两次加载请求的最小间隔（tick）
 inline constexpr int RTP_SPAWN_WAIT_TICKS      = 200;   // 出生流程未走完时的等待上限（tick）
 inline constexpr char RTP_LEGACY_AREA_PREFIX[] = "mtpsrtp_";  // 旧版 /tickingarea 区域名前缀（仅清理残留）
 
@@ -100,10 +101,8 @@ ChunkVerdict resolveChunk(
     SafePos& out, std::string& reason, bool& cheapOut
 );
 
-// 区块视野（ChunkViewSource 封装; 定义在 ChunkViewUtil.cpp）
-struct ChunkView;
-std::shared_ptr<ChunkView> chunkViewCreate(int dimid);                                  // 失败返回 nullptr
-bool chunkViewMove(ChunkView& view, int blockX, int blockZ, int radiusBlocks);           // 换点 = move
-void purgeLegacyTickingAreas(Level& level);                                             // 清理旧版残留区域
+// 区块加载（ChunkSource::getOrLoadChunk 封装; 定义在 ChunkLoadUtil.cpp）
+bool chunkLoadRequest(int dimid, int blockX, int blockZ);   // 让引擎加载/生成该区块
+void purgeLegacyTickingAreas(Level& level);                 // 清理旧版 /tickingarea 残留区域
 
 } // namespace mtps
