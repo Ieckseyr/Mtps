@@ -37,6 +37,7 @@
 #include <mc/deps/core/math/Vec3.h>
 #include <mc/network/packet/SetTitlePacket.h>
 #include <mc/network/packet/SetTitlePacketPayload.h>
+#include <mc/server/NetworkChunkPublisher.h>
 
 #include <atomic>
 #include <cmath>
@@ -159,6 +160,7 @@ struct RandomTeleport::Session {
     int         areaCX{0}, areaCZ{0};  // 中心（方块坐标）
     int         areaRadius{0};          // 半径（区块）
     bool        areaValid{false};
+    int         landingHolds{0};       // 落点周围还没加载完而被推迟传送的次数
     // 传送成功后不立刻撤区域: 宽限期交给 GraceArea 队列处理（见 cleanupSessionArea）
     bool        keepAreaAfterTeleport{false};
     int         spawnWaitTicks{0};   // 等待玩家出生流程完成的 tick 数（见 stepSession 开头）
@@ -378,10 +380,11 @@ void RandomTeleport::pickNewTarget(Session& s) {
             (int)std::round(dist), s.triedTargets.size() > 1
                 ? "（重随, 剩余名额" + std::to_string(s.reRandomLeft) + "）" : "");
 
-    s.state      = Session::PROBE;
-    s.chunkWait  = 0;
-    s.expandRing = 0;
-    s.expandIdx  = 0;
+    s.state        = Session::PROBE;
+    s.chunkWait    = 0;
+    s.expandRing   = 0;
+    s.expandIdx    = 0;
+    s.landingHolds = 0;
 }
 
 // 从存档落点表里抽一个"圆盘半径内、且已有安全落点"的已生成 chunk 当落点。
@@ -397,10 +400,11 @@ bool RandomTeleport::tryKnownLanding(Session& s) {
     s.triedTargets.push_back({s.randomX, s.randomZ});
     RTP_DBG("[RTP][落点] #{} ({}, {}) 取自存档已知安全点 chunk({},{}) y={}（已生成, 不用等地形生成）",
             s.triedTargets.size(), s.randomX, s.randomZ, ld.cx, ld.cz, ld.y);
-    s.state      = Session::PROBE;
-    s.chunkWait  = 0;
-    s.expandRing = 0;
-    s.expandIdx  = 0;
+    s.state        = Session::PROBE;
+    s.chunkWait    = 0;
+    s.expandRing   = 0;
+    s.expandIdx    = 0;
+    s.landingHolds = 0;
     return true;
 }
 
@@ -419,36 +423,65 @@ RandomTeleport::StepResult RandomTeleport::retryOrGiveUp(Session& s, Player& p) 
     return StepResult::Done;
 }
 
+// 落点周围 (2r+1)^2 个区块是否都已加载（只读状态, 不触发加载）。
+// 只等落点自己那一块是不够的: 客户端拿到一块孤零零的区块, 视野里其余部分照样是空的。
+static bool landingNeighborhoodReady(Dimension& dim, int blockX, int blockZ, int chunkRadius) {
+    int const cx = blockX >> 4, cz = blockZ >> 4;
+    for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+        for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+            if (!isChunkReady(dim, (cx + dx) << 4, (cz + dz) << 4)) return false;
+        }
+    }
+    return true;
+}
+
 // 完成（成功: 直接传送到安全点 / 失败: 退款提示, 玩家全程原地）
 void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos const* pos) {
-    // 传送前必须确认落点区块已加载: 扩圈命中的落点可能刚好在区域圆外（例如 r=3 的角落,
-    // 离圆心 4.24 区块）, 那时上面的代码会补登记一个新区域, 但区块还没加载 —— 3 毫秒后就把
-    // 玩家送过去, 客户端收到的是没有区块数据的位置, 表现为"落地就是一片虚空"。
-    // 这里改成: 没就绪就把区域改挂到落点并退回等待流程（LOAD_CHUNK）, 等区块就绪后自然会
-    // 再走到这里 —— 那时落点已在区域覆盖内、区块也 Loaded, 才真正传送。
+    // 落点是否"真的能落地"。硬条件: 落点区块已加载, 且会话区域覆盖落点。
+    // （扩圈命中的落点可能落在区域圆外, 例如 r=3 的角落离圆心 4.24 区块 —— 那时先把区域
+    //   挂到落点、退回等待流程, 等它就绪后自然会再走到这里。）
+    // 软条件: 区域已被引擎激活（不是还挂在 pending）+ 落点周围 (2*等待半径+1)^2 个区块都已加载。
+    // 只满足硬条件就传的话, 玩家会落在"一块孤零零的已加载区块"上: 服务端有方块, 客户端那一圈
+    // 还是空的 —— 看起来仍是一片空白。软条件最多压 RTP_LANDING_HOLD_TICKS 拍, 超了也放行。
     if (success && pos) {
         auto level = ll::service::getLevel();
         if (level) {
             auto dim = level->getDimension((::DimensionType)pos->dimid).lock();
             int const bx = (int)std::floor(pos->x);
             int const bz = (int)std::floor(pos->z);
-            bool const ready = dim && areaCoversLanding(s, *pos) && isChunkReady(*dim, bx, bz);
-            if (!ready) {
+            bool const chunkOk = dim && areaCoversLanding(s, *pos) && isChunkReady(*dim, bx, bz);
+            bool const aroundOk = chunkOk
+                && s.areaValid && findRtpArea(*level, s.areaDim, s.areaName) != nullptr
+                && landingNeighborhoodReady(*dim, bx, bz, RTP_WAIT_AREA_RADIUS_CHUNKS);
+            if (!chunkOk || (!aroundOk && s.landingHolds < RTP_LANDING_HOLD_TICKS)) {
+                // 换落点了才把等待计数清零; 同一落点继续累加（LOAD_CHUNK 的超时要能按期触发,
+                // 否则一个卡住的落点会一路拖到会话总超时）
+                bool const sameLanding = (s.randomX == bx && s.randomZ == bz);
+                if (!sameLanding)      s.chunkWait = 0;
+                else if (chunkOk)      s.landingHolds++;
                 ensureTickingArea(s, *level, bx, bz, RTP_WAIT_AREA_RADIUS_CHUNKS);
-                s.randomX   = bx;
-                s.randomZ   = bz;
-                s.chunkWait = 0;
-                s.state     = Session::LOAD_CHUNK;
-                RTP_DBG("[RTP][落点] 落点区块 ({},{}) 未就绪, 已改挂区域, 等它就绪再传送", bx, bz);
+                s.randomX = bx;
+                s.randomZ = bz;
+                s.state   = Session::LOAD_CHUNK;
+                if (s.landingHolds == 1 || s.landingHolds % 20 == 0) {
+                    RTP_DBG("[RTP][落点] 落点区块 ({},{}) {} → 继续等（第{}拍）", bx, bz,
+                            chunkOk ? "周围还没加载完" : "未就绪", s.landingHolds);
+                }
                 return;   // 不结束会话: 交给 LOAD_CHUNK 等
             }
-            // 就绪: 把区域从"等待半径"扩到"宽限半径", 让落点周围先加载好再传送
-            // （传送后再留 RTP_AREA_GRACE_TICKS 给玩家视野接管, 否则客户端会灰屏）
-            bool const areaEnough = s.areaValid && s.areaRadius >= RTP_GRACE_AREA_RADIUS_CHUNKS
-                                    && areaCoversLanding(s, *pos);
-            if (!areaEnough) {
-                ensureTickingArea(s, *level, bx, bz, RTP_GRACE_AREA_RADIUS_CHUNKS);
-                RTP_DBG("[RTP][区域] 落点 ({}, {}) 的区域扩到 r={} 区块", bx, bz, RTP_GRACE_AREA_RADIUS_CHUNKS);
+            // 放行: 另挂一个以落点为中心的宽限区域。
+            // 不能像以前那样"把等待区域改挂/扩到落点" —— 那要先撤掉覆盖落点的旧区域,
+            // 撤到新区域生效之间有一拍左右没有任何引用, 引擎正好可以卸掉刚加载的区块,
+            // 客户端就会收到"区块没了"（表现为一片空白）。所以旧的留着, 之后再一起撤。
+            bool const covered = areaCoversLanding(s, *pos) && s.areaRadius >= RTP_GRACE_AREA_RADIUS_CHUNKS;
+            if (!covered) {
+                std::string const gname = makeAreaName(s.playerName);
+                if (addRtpArea(*level, s.dimid, gname, bx, bz, RTP_GRACE_AREA_RADIUS_CHUNKS)
+                    == ::AddTickingAreaStatus::Success) {
+                    scheduleAreaRemoval(gname, s.dimid, RTP_AREA_GRACE_TICKS, bx >> 4, bz >> 4);
+                    RTP_DBG("[RTP][区域] 落点 ({}, {}) 另挂 r={} 宽限区域 {}", bx, bz,
+                            RTP_GRACE_AREA_RADIUS_CHUNKS, gname);
+                }
             }
         }
     }
@@ -460,6 +493,9 @@ void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos
             // 正常不会走到这（会话推进前已等出生完成）; 真发生说明出生流程异常
             rtpLogger().warn("[RTP] 玩家 {} 出生流程未完成, 本次传送未执行", s.playerName);
         }
+        // 下一拍核对客户端的区块发布区域有没有跟到落点（没跟上就是"一片空白"）
+        mArrivalChecks.push_back(ArrivalCheck{s.playerName, pos->dimid, pos->x, pos->y, pos->z,
+                                              mTickCounter + 1, 0});
         sendActionbar(p, "§a传送成功");
         std::string costTip = (s.cost > 0 && Config::getInstance().economyEnabled())
             ? " §7(花费 §e" + std::to_string(s.cost) + "§7)" : "";
@@ -713,6 +749,41 @@ RandomTeleport::StepResult RandomTeleport::stepSession(Session& s) {
     return StepResult::Done;
 }
 
+// 传送后的"到达到位"核对。
+// 服务端把区块加载好 ≠ 客户端拿到了区块: 每客户端由 NetworkChunkPublisher 记账"已经发给它
+// 哪些区块", 记录的中心还停在传送前的位置时, 客户端就一直是空的（这正是"一片空白"的由来）。
+// 引擎正常会在下一拍自己跟过去; 没有跟过去就由我们清一次区域, 逼它按新位置重新发布。
+void RandomTeleport::processArrivalChecks() {
+    if (mArrivalChecks.empty()) return;
+    auto level = ll::service::getLevel();
+    if (!level) { mArrivalChecks.clear(); return; }
+
+    for (auto it = mArrivalChecks.begin(); it != mArrivalChecks.end();) {
+        if (mTickCounter < it->atTick) { ++it; continue; }
+        Player* p = level->getPlayer(it->playerName);
+        if (!p) { it = mArrivalChecks.erase(it); continue; }
+        auto& pub = p->mChunkPublisherView;
+        if (!pub) { it = mArrivalChecks.erase(it); continue; }
+
+        int const needCX = (int)std::floor(it->x) >> 4;
+        int const needCZ = (int)std::floor(it->z) >> 4;
+        auto*     lastPub = pub->mLastChunkUpdatePosition.operator->();   // TypedStorage 取值
+        int const haveCX = lastPub->x >> 4;
+        int const haveCZ = lastPub->z >> 4;
+        int const r      = std::max(2, (int)pub->mLastChunkUpdateRadius);
+        if (std::abs(haveCX - needCX) <= r && std::abs(haveCZ - needCZ) <= r) {
+            it = mArrivalChecks.erase(it);   // 已经跟过去了, 正常
+            continue;
+        }
+        pub->clearRegion();   // 客户端那边还是旧区域: 清掉记账, 让引擎下一拍按新位置重发
+        RTP_DBG("[RTP][发布] {} 的区块发布区域还停在 chunk({},{})（落点 chunk({},{})）→ 已清空重发（第{}次）",
+                it->playerName, haveCX, haveCZ, needCX, needCZ, it->tries + 1);
+        if (++it->tries >= RTP_PUBLISH_MAX_RETRY) { it = mArrivalChecks.erase(it); continue; }
+        it->atTick = mTickCounter + RTP_PUBLISH_RECHECK_TICKS;
+        ++it;
+    }
+}
+
 // 调度（多会话轮流推进, 单会话限步数）
 void RandomTeleport::tick() {
     mTickCounter++;
@@ -724,6 +795,7 @@ void RandomTeleport::tick() {
         if (level) purgeStaleRtpAreas(*level);
     }
     processGraceAreas();   // 传送成功后保留的常加载区域: 宽限期到就撤
+    processArrivalChecks();  // 传送后核对客户端有没有真的收到落点周围的区块
     // 时间预算: 按会话数平分, 每个会话至少允许推进一步（否则会被饿死）。
     // 外层还有一道总闸: 会话多的时候"平分"会让总时间超过预算, 所以总耗时到上限就停。
     auto const tickStart    = std::chrono::steady_clock::now();

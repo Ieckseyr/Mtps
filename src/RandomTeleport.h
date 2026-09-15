@@ -68,6 +68,16 @@ private:
     std::vector<GraceArea> mGraceAreas;
     int64_t                mTickCounter{0};
 
+    // 传送后的"到达到位"核对（见 processArrivalChecks）
+    struct ArrivalCheck {
+        std::string playerName;
+        int         dim{0};
+        double      x{0}, y{0}, z{0};
+        int64_t     atTick{0};
+        int         tries{0};
+    };
+    std::vector<ArrivalCheck> mArrivalChecks;
+
     // 状态机返回值（原来用 0/1/2 靠注释解释）
     enum class StepResult { Progress, Done, Waiting };
 
@@ -91,6 +101,7 @@ private:
     void scheduleAreaRemoval(std::string const& name, int dim, int delayTicks,
                              int landingCX, int landingCZ);
     void processGraceAreas();                          // 宽限期到 → 撤销区域
+    void processArrivalChecks();                       // 传送后核对客户端的区块发布区域
     static bool areaCoversLanding(Session const& s, SafePos const& p);  // 落点是否在区域覆盖内
 };
 

@@ -37,6 +37,9 @@ inline constexpr int RTP_TICK_BUDGET_MS        = 4;     // 每 tick 总时间预
 inline constexpr int RTP_TABLE_CHUNKS_PER_TICK = 512;   // 每 tick 最多走落点表（零 IO）的区块数
 inline constexpr int RTP_AREA_GRACE_TICKS      = 200;   // 传送成功后区域的宽限保留时长（tick）
 inline constexpr int RTP_SPAWN_WAIT_TICKS      = 200;   // 出生流程未走完时的等待上限（tick）
+inline constexpr int RTP_LANDING_HOLD_TICKS    = 40;    // 落点周围还没加载完时, 最多再等多少拍
+inline constexpr int RTP_PUBLISH_RECHECK_TICKS = 2;     // 传送到位后核对客户端发布区域的间隔（tick）
+inline constexpr int RTP_PUBLISH_MAX_RETRY     = 3;     // 发布区域核对最多重试几次
 inline constexpr char RTP_AREA_PREFIX[]        = "mtpsrtp_";  // 区域名前缀（清理残留用）
 
 // 日志（debug 开关在 config 的 randomTeleport.debug）
