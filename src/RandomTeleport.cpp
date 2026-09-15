@@ -281,11 +281,14 @@ static std::unordered_map<std::string, int64_t>& rtpCooldowns() {
 }
 
 void RandomTeleport::start(Player& player, RtpOptions const& opts) {
-    // 冷却: 预设自己设了就用它的, 否则用全局 randomTeleport.cooldownSeconds
-    int cooldown = opts.cooldownSeconds > 0 ? opts.cooldownSeconds
-                                            : Config::getInstance().randomCooldownSeconds();
+    // 冷却: 预设自己设了就用它的, 否则用全局 randomTeleport.cooldownSeconds; <0 = 不检查
+    // （调用方自带冷却的入口用 <0, 例如 NPC 随机传送点 —— 那个点有自己的冷却, 不该再被全局卡一次）。
+    // 记账键必须带预设身份: 只用消息文本的话, 消息相同的多个预设会共用一条记录, 互相干扰。
+    int cooldown = opts.cooldownSeconds;
+    if (cooldown == 0) cooldown = Config::getInstance().randomCooldownSeconds();
     if (cooldown > 0) {
-        std::string const key = player.getRealName() + "|" + opts.message;
+        std::string const key = player.getRealName() + "|" +
+                                (opts.presetName.empty() ? opts.message : opts.presetName);
         int64_t           now = (int64_t)std::time(nullptr);
         auto              it  = rtpCooldowns().find(key);
         if (it != rtpCooldowns().end()) {

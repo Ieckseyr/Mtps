@@ -119,6 +119,8 @@ void openRandomTeleportMenu(Player& player, std::string const& actionStr) {
             opts.radius = preset.radius;
             opts.message = preset.message;
             opts.cost = cost;
+            opts.presetName      = preset.name;
+            opts.cooldownSeconds = preset.cooldown;   // 该预设自己的冷却（0 = 用全局）
             RandomTeleport::getInstance().start(player, opts);
             return;
         }
@@ -129,28 +131,6 @@ void openRandomTeleportMenu(Player& player, std::string const& actionStr) {
 
     ll::form::SimpleForm fm("§l§b随机传送", "§r选择预设传送到随机安全位置");
 
-    // 自定义半径: 不受预设限制, 直接填数字
-    fm.appendButton("§a自定义半径传送\n§7自己填半径, 不占预设", tex::ADD, "path",
-        [&player](Player&) {
-            ll::form::CustomForm form("§l§a自定义半径随机传送");
-            form.appendInput("radius", "§e随机半径（格, 直接填数字）", "1000", "1000");
-            form.appendToggle("usePlayer", "§e以我当前位置为中心（关闭 = 世界原点）", true);
-            form.sendTo(player, [](Player& pl, ll::form::CustomFormResult const& res,
-                                   ll::form::FormCancelReason) {
-                if (!res.has_value()) return openRandomTeleportMenu(pl);
-                RtpOptions opts;
-                opts.dimid           = (int)pl.getDimensionId();
-                opts.originMode      = formGetBool(res, "usePlayer", true) ? "player" : "fixed";
-                opts.originX         = 0;
-                opts.originZ         = 0;
-                opts.radius          = std::max(50, (int)formGetNumber(res, "radius", 1000));
-                opts.message         = "§a[随机传送] §f已传送到随机位置（半径 " + std::to_string(opts.radius) + "）！";
-                opts.cost            = 0;
-                opts.cooldownSeconds = 0;   // 走全局冷却
-                tell(pl, "§7[随机传送] 半径 §e" + std::to_string(opts.radius) + "§7 开始搜索…");
-                RandomTeleport::getInstance().start(pl, opts);
-            });
-        });
     for (auto& preset : presets) {
         std::string costText;
         if (preset.economy.enabled && preset.economy.cost > 0) {
@@ -172,6 +152,7 @@ void openRandomTeleportMenu(Player& player, std::string const& actionStr) {
                 opts.radius = preset.radius;
                 opts.message = preset.message;
                 opts.cost = cost;
+                opts.presetName      = preset.name;
                 opts.cooldownSeconds = preset.cooldown;
                 RandomTeleport::getInstance().start(player, opts);
             });

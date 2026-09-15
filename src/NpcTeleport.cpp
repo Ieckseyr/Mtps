@@ -586,6 +586,8 @@ void NpcTeleport::teleportPlayerToPoint(Player& player, BlockTpPoint const& poin
         }
         opts.message = point.message.empty() ? "§a[随机传送] §f已传送！" : point.message;
         opts.cost = 0; // 已扣费
+        // 这个点有自己的冷却（见本文件开头）: 关掉随机传送的全局冷却, 免得被卡两次
+        opts.cooldownSeconds = -1;
         RandomTeleport::getInstance().start(player, opts);
     } else {
         // 固定传送

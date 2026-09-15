@@ -25,7 +25,10 @@ struct RtpOptions {
     std::string originMode{"fixed"};  // fixed / player
     std::string message;
     int         cost{0};
-    int         cooldownSeconds{0};   // 0 = 用全局配置
+    // 冷却（按预设各自记账, 键 = 玩家 + presetName）:
+    //   >0 用该秒数; ==0 用全局 randomTeleport.cooldownSeconds; <0 不检查（调用方自带冷却）
+    int         cooldownSeconds{0};
+    std::string presetName{};         // 预设名（冷却记账用; 空则退回 message）
     std::string economyType{"default"};
 };
 

@@ -288,26 +288,6 @@ void openPrivateWarpMenu(Player& player, std::string const& actionStr) {
 
     fm.appendButton("§e管理传送点\n§7免申请、删除、重设坐标", tex::SETTINGS, "path",
         [&player](Player&) { openPrivateWarpManageMenu(player); });
-    // 自定义半径（填入数值式, 不受预设限制）
-    fm.appendButton("§a自定义半径传送\n§7自己填入半径数值", tex::ADD, "path",
-        [&player](Player&) {
-            ll::form::CustomForm form("§l§a自定义半径随机传送");
-            form.appendInput("radius", "§e随机半径（格, 直接填数字）", "1000", "1000");
-            form.appendToggle("usePlayer", "§e以我当前位置为中心（关闭 = 以世界原点）", true);
-            form.sendTo(player, [](Player& pl, ll::form::CustomFormResult const& res, ll::form::FormCancelReason) {
-                if (!res.has_value()) return openRandomTeleportMenu(pl);
-                RtpOptions opts;
-                opts.dimid      = (int)pl.getDimensionId();
-                opts.originMode = formGetBool(res, "usePlayer", true) ? "player" : "fixed";
-                opts.originX    = 0;
-                opts.originZ    = 0;
-                opts.radius     = std::max(50, (int)formGetNumber(res, "radius", 1000));
-                opts.message    = "§a[随机传送] §f已传送到随机位置（半径 " + std::to_string(opts.radius) + "）！";
-                opts.cost       = 0;
-                tell(pl, "§7[随机传送] 半径 §e" + std::to_string(opts.radius) + "§7 开始搜索…");
-                RandomTeleport::getInstance().start(pl, opts);
-            });
-        });
     fm.appendButton("§7返回", tex::BACK, "path",
         [&player](Player&) { openWarpMenu(player); });
 
