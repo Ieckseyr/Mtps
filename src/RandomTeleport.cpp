@@ -382,6 +382,29 @@ void RandomTeleport::pickNewTarget(Session& s) {
 
 // 完成（成功: 直接传送到安全点 / 失败: 退款提示, 玩家全程原地）
 void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos const* pos) {
+    // 传送前必须确认落点区块已加载: 扩圈命中的落点可能刚好在区域圆外（例如 r=3 的角落,
+    // 离圆心 4.24 区块）, 那时上面的代码会补登记一个新区域, 但区块还没加载 —— 3 毫秒后就把
+    // 玩家送过去, 客户端收到的是没有区块数据的位置, 表现为"落地就是一片虚空"。
+    // 这里改成: 没就绪就把区域改挂到落点并退回等待流程（LOAD_CHUNK）, 等区块就绪后自然会
+    // 再走到这里 —— 那时落点已在区域覆盖内、区块也 Loaded, 才真正传送。
+    if (success && pos) {
+        auto level = ll::service::getLevel();
+        if (level) {
+            auto dim = level->getDimension((::DimensionType)pos->dimid).lock();
+            int const bx = (int)std::floor(pos->x);
+            int const bz = (int)std::floor(pos->z);
+            bool const ready = dim && areaCoversLanding(s, *pos) && isChunkReady(*dim, bx, bz);
+            if (!ready) {
+                ensureTickingArea(s, *level, bx, bz, RTP_AREA_RADIUS_CHUNKS);
+                s.randomX   = bx;
+                s.randomZ   = bz;
+                s.chunkWait = 0;
+                s.state     = Session::LOAD_CHUNK;
+                RTP_DBG("[RTP][落点] 落点区块 ({},{}) 未就绪, 已改挂区域, 等它就绪再传送", bx, bz);
+                return;   // 不结束会话: 交给 LOAD_CHUNK 等
+            }
+        }
+    }
     s.finished = true;
     if (success && pos) {
         // 落点可能落在区域覆盖范围之外（扩圈命中时离圆心最多 24 chunk）: 那块地没有任何
