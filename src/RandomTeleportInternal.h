@@ -26,11 +26,15 @@ namespace mtps {
 inline constexpr int RTP_CHUNK_WAIT_TICKS      = 200;   // 生成路径: 单落点区块等待上限（tick）
 inline constexpr int RTP_SESSION_TIMEOUT_TICKS = 1200;  // 会话总超时（tick）
 inline constexpr int RTP_STEPS_PER_TICK        = 8;     // 单会话每 tick 最多连续推进步数
-inline constexpr int RTP_AREA_RADIUS_CHUNKS    = 4;     // 常加载区域半径（区块, 命令上限 4）
-inline constexpr int RTP_EXPAND_MAX_RING       = 24;    // 扩圈上限（区块）
+// 等区块就绪时挂的常加载区域半径（区块）。引擎是按块生成/加载的, 区域越大中心越晚轮到
+// （r=4 要处理 81 块 ≈ 50 tick, r=2 只 25 块 ≈ 13 tick）, 所以等待期只用小区域。
+inline constexpr int RTP_WAIT_AREA_RADIUS_CHUNKS = 2;
+// 传送前把区域扩到这个半径, 让落点周围先加载好、传送后再留宽限期（客户端视野接管前不灰屏）
+inline constexpr int RTP_GRACE_AREA_RADIUS_CHUNKS = 4;
+inline constexpr int RTP_EXPAND_MAX_RING       = 32;    // 扩圈上限（区块）
 inline constexpr int RTP_SCAN_CHUNKS_PER_TICK  = 6;     // 每 tick 最多"内存扫/存档直读"的区块数
 inline constexpr int RTP_TICK_BUDGET_MS        = 4;     // 每 tick 总时间预算（毫秒, 按会话平分）
-inline constexpr int RTP_TABLE_CHUNKS_PER_TICK = 256;   // 每 tick 最多走落点表（零 IO）的区块数
+inline constexpr int RTP_TABLE_CHUNKS_PER_TICK = 512;   // 每 tick 最多走落点表（零 IO）的区块数
 inline constexpr int RTP_AREA_GRACE_TICKS      = 200;   // 传送成功后区域的宽限保留时长（tick）
 inline constexpr int RTP_SPAWN_WAIT_TICKS      = 200;   // 出生流程未走完时的等待上限（tick）
 inline constexpr char RTP_AREA_PREFIX[]        = "mtpsrtp_";  // 区域名前缀（清理残留用）
@@ -91,6 +95,9 @@ bool scanChunkMemory(
 // 单块判定结论
 enum class ChunkVerdict { Safe, Unsafe, NoData };
 
+// 判定用的是哪个数据源（扩圈汇总日志按来源计数, 便于区分"大洋"和"没生成"）
+enum class ChunkSource { None, Memory, Table, Archive };
+
 // 三源逐级判定一块: 内存 -> 落点表 -> 存档直读
 // cheapOut 表示这次是"零 IO 零分配"（走的落点表）, 调用方据此决定是否计入 tick 预算
 ChunkVerdict resolveChunk(
@@ -98,7 +105,8 @@ ChunkVerdict resolveChunk(
     YRange yRange, int scanStartY,
     std::unordered_set<std::string> const& dangerSet,
     std::unordered_set<std::string> const& dangerShortSet,
-    SafePos& out, std::string& reason, bool& cheapOut
+    SafePos& out, std::string& reason, bool& cheapOut,
+    ChunkSource* srcOut = nullptr
 );
 
 // 常加载区域（命令封装）

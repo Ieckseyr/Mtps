@@ -326,3 +326,41 @@ size_t BedrockLevelReader::landingCount() const {
     for (int d = 0; d < 3; d++) n += mLandings[d].size();
     return n;
 }
+
+size_t BedrockLevelReader::landingCountForDim(int dim) const {
+    if (dim < 0 || dim > 2) return 0;
+    if (!mLandingsReady.load(std::memory_order_acquire)) return 0;
+    return mLandings[dim].size();
+}
+
+// splitmix64: 把调用方给的种子摊开, 免得连续种子抽出相邻下标
+static uint64_t mix64_(uint64_t& x) {
+    x += 0x9E3779B97F4A7C15ull;
+    uint64_t z = x;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+bool BedrockLevelReader::pickSafeLandingInRange(int originBX, int originBZ, int radiusBlocks,
+                                                int dim, uint64_t seed, Landing& out,
+                                                int tries) const {
+    if (dim < 0 || dim > 2) return false;
+    if (!mLandingsReady.load(std::memory_order_acquire)) return false;
+    auto const& table = mLandings[dim];
+    if (table.empty()) return false;
+
+    int64_t const r2 = (int64_t)radiusBlocks * (int64_t)radiusBlocks;
+    uint64_t      s  = seed;
+    for (int t = 0; t < tries; t++) {
+        Landing const& ld = table[mix64_(s) % table.size()];
+        if (ld.state != LAND_SAFE) continue;
+        // 用 chunk 中心到原点的距离判圆内外（与落点选点的圆盘一致）
+        int64_t const dx = (int64_t)ld.cx * 16 + 8 - originBX;
+        int64_t const dz = (int64_t)ld.cz * 16 + 8 - originBZ;
+        if (dx * dx + dz * dz > r2) continue;
+        out = ld;
+        return true;
+    }
+    return false;
+}

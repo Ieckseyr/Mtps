@@ -34,10 +34,10 @@ struct RtpOptions {
 
 // 随机传送（四级数据源 + 引擎 TickingArea 兜底版）
 // 机制: 玩家原地等待 → 随机选坐标 → 判定落点 chunk（内存 → 落点预计算表 → 存档直读 →
-// tickingarea 生成）→ 整 chunk 无安全列则按 chunk 粒度扩圈(1~24) → 换随机点重来(最多 6 次)
-// → 失败退款, 玩家全程原地。数据源演进见 README「设计说明」。
-// 常加载区域: 传送成功后留 RTP_AREA_GRACE_TICKS 宽限期再撤（立刻撤会让客户端收不到区块
-// 数据 → 灰屏）; 落点在区域覆盖范围外时先补一个以落点为中心的区域。
+// tickingarea 生成）→ 整 chunk 无安全列则按 chunk 粒度扩圈 → 换随机点重来(最多 6 次)
+// → 失败退款, 玩家全程原地。数据源演进见 README「随机传送怎么生成新区块」。
+// 常加载区域: 等生成时只挂小区域（半径小则中心区块更早轮到位）, 传送前再扩到宽限半径并保留
+// RTP_AREA_GRACE_TICKS 才撤（立刻撤会让客户端收不到区块数据 → 灰屏）。
 class RandomTeleport {
 public:
     static RandomTeleport& getInstance();
@@ -72,6 +72,10 @@ private:
     enum class StepResult { Progress, Done, Waiting };
 
     void pickNewTarget(Session& s);                    // 选新随机落点（不传送玩家）
+    // 取一个"存档里已知安全"的已生成地块当落点; false = 存档里没有符合条件的
+    bool tryKnownLanding(Session& s);
+    // 一次选点失败后的收尾: 名额内换点重随 → 最后试一次已知安全点 → 仍不行才放弃
+    StepResult retryOrGiveUp(Session& s, Player& p);
 
     // 会话推进：主函数只分发，各状态逻辑在自己的 stepXxx 里
     StepResult stepSession(Session& s);

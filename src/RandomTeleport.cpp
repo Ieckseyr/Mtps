@@ -135,6 +135,7 @@ struct RandomTeleport::Session {
     int         scanStartY{0};
 
     int         reRandomLeft{6};
+    bool        usedKnownFallback{false};  // 重随名额用尽后是否已试过"已知安全点"兜底
     std::vector<std::pair<int,int>> triedTargets;
 
     int         randomX{0}, randomZ{0};
@@ -349,6 +350,9 @@ void RandomTeleport::start(Player& player, RtpOptions const& opts) {
 
 // 选新随机落点（玩家原地不动, 只更新会话目标）
 void RandomTeleport::pickNewTarget(Session& s) {
+    // 配置开了就先试"存档里已知安全"的已生成地块（落点确定、不用等地形生成）
+    if (Config::getInstance().randomPreferKnown() && tryKnownLanding(s)) return;
+
     // 圆内随机挑点（√r 均匀分布），避开之前失败的落点
     int avoidDist = std::min(640, std::max(128, s.radius / 4));
     std::uniform_real_distribution<double> dist01(0, 1);
@@ -380,6 +384,41 @@ void RandomTeleport::pickNewTarget(Session& s) {
     s.expandIdx  = 0;
 }
 
+// 从存档落点表里抽一个"圆盘半径内、且已有安全落点"的已生成 chunk 当落点。
+// 这类区块地形早就生成好了（甚至已在内存里）, 省掉整段"等它生成"的开销。
+bool RandomTeleport::tryKnownLanding(Session& s) {
+    BedrockLevelReader::Landing ld{};
+    if (!ArchiveScanner::getInstance().pickSafeLandingInRange(
+            (int)s.originX, (int)s.originZ, s.radius, s.dimid, rng()(), ld)) {
+        return false;
+    }
+    s.randomX = ld.cx * 16 + (ld.lx >= 0 && ld.lx < 16 ? ld.lx : 8);
+    s.randomZ = ld.cz * 16 + (ld.lz >= 0 && ld.lz < 16 ? ld.lz : 8);
+    s.triedTargets.push_back({s.randomX, s.randomZ});
+    RTP_DBG("[RTP][落点] #{} ({}, {}) 取自存档已知安全点 chunk({},{}) y={}（已生成, 不用等地形生成）",
+            s.triedTargets.size(), s.randomX, s.randomZ, ld.cx, ld.cz, ld.y);
+    s.state      = Session::PROBE;
+    s.chunkWait  = 0;
+    s.expandRing = 0;
+    s.expandIdx  = 0;
+    return true;
+}
+
+// 一次选点彻底失败: 名额内换点重随; 名额用尽时最后试一次已知安全点; 还是不行才退款放弃
+RandomTeleport::StepResult RandomTeleport::retryOrGiveUp(Session& s, Player& p) {
+    if (s.reRandomLeft > 0) {
+        s.reRandomLeft--;
+        pickNewTarget(s);
+        return StepResult::Progress;
+    }
+    if (!s.usedKnownFallback && tryKnownLanding(s)) {
+        s.usedKnownFallback = true;
+        return StepResult::Progress;
+    }
+    finishTeleport(s, p, false, nullptr);
+    return StepResult::Done;
+}
+
 // 完成（成功: 直接传送到安全点 / 失败: 退款提示, 玩家全程原地）
 void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos const* pos) {
     // 传送前必须确认落点区块已加载: 扩圈命中的落点可能刚好在区域圆外（例如 r=3 的角落,
@@ -395,7 +434,7 @@ void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos
             int const bz = (int)std::floor(pos->z);
             bool const ready = dim && areaCoversLanding(s, *pos) && isChunkReady(*dim, bx, bz);
             if (!ready) {
-                ensureTickingArea(s, *level, bx, bz, RTP_AREA_RADIUS_CHUNKS);
+                ensureTickingArea(s, *level, bx, bz, RTP_WAIT_AREA_RADIUS_CHUNKS);
                 s.randomX   = bx;
                 s.randomZ   = bz;
                 s.chunkWait = 0;
@@ -403,19 +442,18 @@ void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos
                 RTP_DBG("[RTP][落点] 落点区块 ({},{}) 未就绪, 已改挂区域, 等它就绪再传送", bx, bz);
                 return;   // 不结束会话: 交给 LOAD_CHUNK 等
             }
+            // 就绪: 把区域从"等待半径"扩到"宽限半径", 让落点周围先加载好再传送
+            // （传送后再留 RTP_AREA_GRACE_TICKS 给玩家视野接管, 否则客户端会灰屏）
+            bool const areaEnough = s.areaValid && s.areaRadius >= RTP_GRACE_AREA_RADIUS_CHUNKS
+                                    && areaCoversLanding(s, *pos);
+            if (!areaEnough) {
+                ensureTickingArea(s, *level, bx, bz, RTP_GRACE_AREA_RADIUS_CHUNKS);
+                RTP_DBG("[RTP][区域] 落点 ({}, {}) 的区域扩到 r={} 区块", bx, bz, RTP_GRACE_AREA_RADIUS_CHUNKS);
+            }
         }
     }
     s.finished = true;
     if (success && pos) {
-        // 落点可能落在区域覆盖范围之外（扩圈命中时离圆心最多 24 chunk）: 那块地没有任何
-        // 加载引用, 玩家会直接落在未加载区域。补一个以落点为中心的区域, 让引擎立刻开始加载。
-        auto level = ll::service::getLevel();
-        if (level && !areaCoversLanding(s, *pos)) {
-            ensureTickingArea(s, *level, (int)std::floor(pos->x), (int)std::floor(pos->z),
-                              RTP_AREA_RADIUS_CHUNKS);
-            RTP_DBG("[RTP][区域] 落点在原区域外, 改挂到落点 ({}, {})",
-                    (int)std::floor(pos->x), (int)std::floor(pos->z));
-        }
         s.keepAreaAfterTeleport = true;   // 区域撤离交给宽限期（见 cleanupSessionArea）
         if (!teleportPlayerIfReady(p, Vec3((float)pos->x, (float)pos->y, (float)pos->z),
                                    (::DimensionType)pos->dimid)) {
@@ -472,7 +510,7 @@ RandomTeleport::StepResult RandomTeleport::stepProbe(Session& s, Level& level, P
                     s.triedTargets.size(), s.randomX, s.randomZ, reason);
             // 除了登记常加载区域, 再直接向引擎请求这个区块（Deferred: 允许异步生成）
             requestChunkLoad(s.dimid, s.randomX, s.randomZ);
-            ensureTickingArea(s, level, s.randomX, s.randomZ, RTP_AREA_RADIUS_CHUNKS);
+            ensureTickingArea(s, level, s.randomX, s.randomZ, RTP_WAIT_AREA_RADIUS_CHUNKS);
             s.state = Session::LOAD_CHUNK;
             return StepResult::Waiting; // 生成中, 下 tick 轮询
     }
@@ -486,7 +524,7 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
         RTP_DBG("[RTP][等待] #{} ({},{}) 区块{}tick未就绪(最后状态={}), {}",
                 s.triedTargets.size(), s.randomX, s.randomZ, RTP_CHUNK_WAIT_TICKS,
                 chunkStateName(chunkStateAt(dim, s.randomX, s.randomZ)),
-                s.reRandomLeft > 0 ? "换点重随" : "重随名额用尽, 放弃");
+                s.reRandomLeft > 0 ? "换点重随" : "再试一次已知安全点");
         // 诊断: 把引擎侧的实际情况读回来（是否激活 / 加载模式 / 完成标记 / 区域 bounds）
         if (s.areaValid) {
             auto* area = findRtpArea(level, s.areaDim, s.areaName);
@@ -499,9 +537,7 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
                                  area->getView().isDoneLoading() ? 1 : 0);
             }
         }
-        if (s.reRandomLeft > 0) { s.reRandomLeft--; pickNewTarget(s); return StepResult::Progress; }
-        finishTeleport(s, p, false, nullptr);
-        return StepResult::Done;
+        return retryOrGiveUp(s, p);
     }
     if (!isChunkReady(dim, s.randomX, s.randomZ)) {
         // 地形数据在 Loaded 之前就有了，后面还有修饰/光照阶段 —— 实测这两个阶段占掉等待时间的大半。
@@ -523,7 +559,7 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
             }
         }
 
-        ensureTickingArea(s, level, s.randomX, s.randomZ, RTP_AREA_RADIUS_CHUNKS); // 区域兜底（正常已就位）
+        ensureTickingArea(s, level, s.randomX, s.randomZ, RTP_WAIT_AREA_RADIUS_CHUNKS); // 区域兜底（正常已就位）
         requestChunkLoad(s.dimid, s.randomX, s.randomZ);   // 每 tick 推一次, 别让引擎队列空着
         if (s.chunkWait % 20 == 1) {
             RTP_DBG("[RTP][等待] #{} ({},{}) 第{}tick 状态={}",
@@ -565,23 +601,38 @@ RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, 
     auto& ring = expandRing(s.expandRing);
     int expensive = 0;  // 本 tick 内存扫描 + 存档直读次数（预算控制）
     int cheapCnt  = 0;  // 本 tick 落点表命中次数（独立、宽得多的预算）
-    int pending = 0;    // TickingArea 区内未就绪 chunk 数（等生成, 不耗预算）
-    int missed  = 0;    // 区外无数据 chunk 数（跳过）
+    int pending = 0;    // 区内未就绪 chunk 数（等生成, 不耗预算）
+    // 未命中的来源拆分（诊断: 区分"这片是大洋"和"这片压根没生成"）
+    int memMiss = 0, tableMiss = 0, noDataMiss = 0;
+
+    // 存档里这一维度一个区块都没有（全新世界 / 表还没就绪）: 区外全是"无数据",
+    // 扫完几十圈也只是白跑, 直接按"圈耗尽"处理。
+    auto& arch = ArchiveScanner::getInstance();
+    bool const archiveEmpty = arch.landingsReady() && arch.landingCountForDim(s.dimid) == 0;
+    bool const inAreaRing    = s.areaValid && s.expandRing <= s.areaRadius;
+    if (archiveEmpty && !inAreaRing) {
+        RTP_DBG("[RTP][扩圈] 存档里维度{}没有任何区块, 区外不必再扫", s.dimid);
+        return retryOrGiveUp(s, p);
+    }
+
+    int const ccx0 = s.randomX >> 4, ccz0 = s.randomZ >> 4;
     int i = s.expandIdx;
     for (; i < (int)ring.size(); i++) {
         if (expensive >= RTP_SCAN_CHUNKS_PER_TICK) break;
         if (cheapCnt >= RTP_TABLE_CHUNKS_PER_TICK) break;
-        int ccx = (s.randomX >> 4) + ring[i].dx;
-        int ccz = (s.randomZ >> 4) + ring[i].dz;
-        // TickingArea 区内（r ≤ 区域半径）但未就绪: 等生成后重扫
-        bool inArea = s.areaValid && s.expandRing <= RTP_AREA_RADIUS_CHUNKS;
+        int ccx = ccx0 + ring[i].dx;
+        int ccz = ccz0 + ring[i].dz;
+        // 区内（到圆心距离 ≤ 区域半径的圆内）但未就绪: 等生成后重扫本圈
+        bool const inArea = s.areaValid
+            && (ring[i].dx * ring[i].dx + ring[i].dz * ring[i].dz <= s.areaRadius * s.areaRadius);
         if (inArea && !isChunkReady(dim, ccx << 4, ccz << 4)) { pending++; continue; }
         // 判定（内部三源逐级: 内存优先 → 落点表 → 存档直读; 查不到 = 未生成的 chunk）
         SafePos     pos{};
         std::string reason;
         bool        cheap = false;
+        ChunkSource src   = ChunkSource::None;
         ChunkVerdict v = resolveChunk(dim, s.dimid, ccx, ccz, s.yRange, s.scanStartY,
-                                      s.dangerSet, s.dangerShortSet, pos, reason, cheap);
+                                      s.dangerSet, s.dangerShortSet, pos, reason, cheap, &src);
         if (cheap) cheapCnt++; else expensive++;
         if (v == ChunkVerdict::Safe) {
             RTP_DBG("[RTP][扩圈] r={} chunk({},{}) 命中安全列 ({}, {}, {})",
@@ -589,7 +640,9 @@ RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, 
             finishTeleport(s, p, true, &pos);
             return StepResult::Done;
         }
-        if (v == ChunkVerdict::NoData) missed++;
+        if (v == ChunkVerdict::NoData) noDataMiss++;
+        else if (src == ChunkSource::Memory) memMiss++;
+        else tableMiss++;
     }
     s.expandIdx = i;
 
@@ -600,22 +653,16 @@ RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, 
         return StepResult::Waiting;
     }
     // 本圈彻底扫完
-    RTP_DBG("[RTP][扩圈] r={} 圈扫描完毕(未命中, 区外无数据{})", s.expandRing, missed);
+    RTP_DBG("[RTP][扩圈] r={} 圈扫描完毕(未命中: 内存{} 落点表{} 无数据{})",
+            s.expandRing, memMiss, tableMiss, noDataMiss);
     if (s.expandRing < RTP_EXPAND_MAX_RING) {
         s.expandRing++;
         s.expandIdx = 0;
         return StepResult::Progress;
     }
-    // 24 圈（384 格）耗尽: 大洋中央/大片未生成区域 → 换点重随
-    RTP_DBG("[RTP][扩圈] 全部{}圈耗尽, {}", RTP_EXPAND_MAX_RING,
-            s.reRandomLeft > 0 ? "换随机点重随" : "重随名额用尽");
-    if (s.reRandomLeft > 0) {
-        s.reRandomLeft--;
-        pickNewTarget(s);
-        return StepResult::Progress;
-    }
-    finishTeleport(s, p, false, nullptr);
-    return StepResult::Done;
+    // 全部圈耗尽: 大洋中央/大片未生成区域 → 换点重随
+    RTP_DBG("[RTP][扩圈] 全部{}圈耗尽", RTP_EXPAND_MAX_RING);
+    return retryOrGiveUp(s, p);
 }
 
 RandomTeleport::StepResult RandomTeleport::stepSession(Session& s) {

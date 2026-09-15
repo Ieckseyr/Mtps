@@ -75,6 +75,8 @@ public:
     int         randomCooldownSeconds() const { return mRandomCooldown; }
     int         randomMaxAttempts() const { return mRandomMaxAttempts; }
     bool        randomDebug() const { return mRandomDebug; }
+    // 选点是否总是优先取"存档里已知安全"的已生成 chunk（关 = 首次仍按圆盘均匀随机, 重随时才用）
+    bool        randomPreferKnown() const { return mRandomPreferKnown; }
     std::vector<std::string> const& dangerBlocks() const;
     // 危险方块短名（已剥离 minecraft: 前缀, 存档 palette 用）
     std::vector<std::string> const& dangerShortBlocks() const;
@@ -171,6 +173,7 @@ private:
     int  mRandomCooldown{120};
     int  mRandomMaxAttempts{50};
     bool mRandomDebug{true};
+    bool mRandomPreferKnown{false};
     bool mBlockTpEnabled{true};
     std::string mBlockTpQuickAddItem{"minecraft:nether_star"};
     bool mBlockTpQuickAddRequireSneak{true};

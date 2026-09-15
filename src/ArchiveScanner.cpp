@@ -156,6 +156,23 @@ bool ArchiveScanner::lookupLanding(int cx, int cz, int dim, BedrockLevelReader::
     }
 }
 
+size_t ArchiveScanner::landingCountForDim(int dim) const {
+    return (ready() && mReader) ? mReader->landingCountForDim(dim) : 0;
+}
+
+bool ArchiveScanner::pickSafeLandingInRange(int originBX, int originBZ, int radiusBlocks, int dim,
+                                            uint64_t seed, BedrockLevelReader::Landing& out,
+                                            int tries) {
+    if (!ready()) return false;
+    std::lock_guard<std::mutex> lk(mMutex);
+    if (!mReader) return false;
+    try {
+        return mReader->pickSafeLandingInRange(originBX, originBZ, radiusBlocks, dim, seed, out, tries);
+    } catch (...) {
+        return false;
+    }
+}
+
 BedrockLevelReader::ChunkSurface ArchiveScanner::scanChunk(int cx, int cz, int dim) {
     if (!ready()) return {};
     // ready 后 mReader 只增不改（shutdown 前唯一写入点）, 此处无锁读安全;

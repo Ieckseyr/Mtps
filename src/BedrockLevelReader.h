@@ -64,6 +64,14 @@ public:
     // 查表: 返回 false = 存档里没有该 chunk（从未生成, 或表尚未覆盖）
     bool lookupLanding(int cx, int cz, int dim, Landing& out) const;
     size_t landingCount() const;
+
+    // 该维度表里的 chunk 数（0 = 这一维度存档里什么都没生成, 扩圈扫了也全是无数据）
+    size_t landingCountForDim(int dim) const;
+
+    // 反复随机抽表里的一项, 取第一个"在半径内且已有安全落点"的 chunk（拒绝采样, 零 IO）。
+    // seed 由调用方给（每次调用换个随机数）; tries 用尽或表未就绪/为空返回 false。
+    bool pickSafeLandingInRange(int originBX, int originBZ, int radiusBlocks, int dim,
+                                uint64_t seed, Landing& out, int tries = 128) const;
     bool   landingsReady() const { return mLandingsReady.load(std::memory_order_acquire); }
 
     // 请求中断（open 的并行扫描 / buildLandings 都会尽快退出）

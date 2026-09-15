@@ -73,6 +73,7 @@ Minecraft 基岩版（LeviLamina 26.40）的传送系统插件，C++ 实现。
   },
   "randomTeleport": {
     "cooldownSeconds": 120,
+    "preferKnownLandings": false,
     "presets": [
       { "name": "主世界随机", "radius": 1000, "dimid": 0, "cooldown": 0 }
     ]
@@ -97,6 +98,9 @@ Minecraft 基岩版（LeviLamina 26.40）的传送系统插件，C++ 实现。
 - `blockTeleport.editTool`：管理员编辑工具，`item` 填物品名（留空 = 只认蹲下）。
 - `randomTeleport.cooldownSeconds`：全局随机传送冷却；预设自己的 `cooldown` 优先，
   `0` = 用全局、`>0` = 用该值。
+- `randomTeleport.preferKnownLandings`：选点时优先取"存档里已知安全"的已生成区块。
+  打开后传送基本是即时的（不用等地形生成），代价是落点只会落在已探索范围内；
+  关（默认）时仍按圆盘均匀随机选点，适合想让玩家散到新地形的服。
 - `papi`：占位符注册开关与格式（某条设为空串 = 关掉该占位符）。
 
 ## PAPI 占位符
@@ -170,6 +174,12 @@ bool     MHR_DespawnEntity(const char* ownerKey);
 
 区块就绪后才传送；落点若落在区域之外（扩圈命中的角落）会先把区域改挂到落点、等它就绪再传
 —— 否则玩家会落进没有区块数据的位置（表现为一片虚空）。
+
+几个提速上的取舍：等生成时只挂半径 2 的小区域（引擎按块处理，区域越大中心越晚轮到，
+半径 4 要处理 81 块、半径 2 只 25 块），传送前再扩到半径 4 并保留宽限期。扩圈搜索里"表里没有
+这个区块"也算廉价查询（一次二分），否则整片没生成过的荒野会把每 tick 的扫描额度吃光；
+重随名额用尽时会退回"存档已知安全点"再试一次，而不是直接放弃。选点策略见
+`preferKnownLandings`。
 
 ## 构建
 

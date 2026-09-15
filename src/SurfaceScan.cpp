@@ -228,17 +228,21 @@ bool scanChunkMemory(
 }
 
 // cheapOut: 本次判定是否"零 IO 零分配"（走落点表）—— 供调用方决定是否计入 tick 预算
+// srcOut: 本次用的是哪个数据源（诊断用, 可空）
 ChunkVerdict resolveChunk(
     Dimension& dim, int dimid, int cx, int cz,
     YRange yRange, int scanStartY,
     std::unordered_set<std::string> const& dangerSet,
     std::unordered_set<std::string> const& dangerShortSet,
-    SafePos& out, std::string& reason, bool& cheapOut
+    SafePos& out, std::string& reason, bool& cheapOut,
+    ChunkSource* srcOut
 ) {
     cheapOut = false;
+    if (srcOut) *srcOut = ChunkSource::None;
 
     // ① 内存缓存优先: 已加载 chunk 的内存数据最新（玩家刚改动的方块存档层看不到）
     if (isChunkReady(dim, cx << 4, cz << 4)) {
+        if (srcOut) *srcOut = ChunkSource::Memory;
         if (scanChunkMemory(dim, dimid, cx, cz, yRange, scanStartY, dangerSet, out)) return ChunkVerdict::Safe;
         reason = "内存扫:整chunk无安全列";
         return ChunkVerdict::Unsafe;
@@ -248,6 +252,7 @@ ChunkVerdict resolveChunk(
     BedrockLevelReader::Landing ld{};
     if (ArchiveScanner::getInstance().lookupLanding(cx, cz, dimid, ld)) {
         cheapOut = true;
+        if (srcOut) *srcOut = ChunkSource::Table;
         if (ld.state == BedrockLevelReader::LAND_SAFE) {
             out = {cx * 16 + ld.lx + 0.5, (double)ld.y, cz * 16 + ld.lz + 0.5, dimid};
             return ChunkVerdict::Safe;
@@ -255,14 +260,18 @@ ChunkVerdict resolveChunk(
         reason = "落点表:整chunk无安全列";
         return ChunkVerdict::Unsafe;
     }
-    // 表已就绪时, 查不到即"存档确实没有该 chunk"（表覆盖索引里的全部 chunk）
+    // 表已就绪时, 查不到即"存档确实没有该 chunk"（表覆盖索引里的全部 chunk）。
+    // 这也是一次内存二分, 同样算廉价 —— 否则未生成的荒野会把 tick 预算吃光,
+    // 扩圈一圈要扫几十 tick（扩圈的主要成本应该只是"真去内存扫"的那些块）。
     if (ArchiveScanner::getInstance().landingsReady()) {
+        cheapOut = true;
         reason = "存档无此chunk";
         return ChunkVerdict::NoData;
     }
 
     // ③ 存档直读兜底: 表还在后台算（启动初期）时, 保持原同步直读行为
     if (ArchiveScanner::getInstance().ready()) {
+        if (srcOut) *srcOut = ChunkSource::Archive;
         auto sfc = ArchiveScanner::getInstance().scanChunk(cx, cz, dimid);
         bool hasAny = false;
         for (int i = 0; i < 256; i++) {

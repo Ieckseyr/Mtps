@@ -33,6 +33,13 @@ public:
     // 落点表查询（每 chunk 一次内存二分）; false = 该 chunk 不在表中（走同步兜底）
     bool lookupLanding(int cx, int cz, int dim, BedrockLevelReader::Landing& out);
 
+    // 该维度表里的 chunk 数（0 = 存档里这一维度没生成过东西）
+    size_t landingCountForDim(int dim) const;
+
+    // 抽一个"半径内且已有安全落点"的已生成 chunk（零 IO, 拒绝采样）
+    bool pickSafeLandingInRange(int originBX, int originBZ, int radiusBlocks, int dim,
+                                uint64_t seed, BedrockLevelReader::Landing& out, int tries = 128);
+
     // 诊断信息（open 耗时/索引规模等, 日志用）
     std::string diagInfo() const;
 

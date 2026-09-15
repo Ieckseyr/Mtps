@@ -64,7 +64,7 @@ json Config::defaultConfig() const {
         },
         "randomTeleport": {
             "enabled": true, "cooldownSeconds": 120, "maxAttempts": 50,
-            "debug": true,
+            "debug": true, "preferKnownLandings": false,
             "dangerBlocks": [ "minecraft:lava","minecraft:flowing_lava","minecraft:water","minecraft:flowing_water",
                 "minecraft:fire","minecraft:soul_fire","minecraft:cactus","minecraft:sweet_berry_bush",
                 "minecraft:magma_block","minecraft:wither_rose","minecraft:powder_snow" ],
@@ -256,6 +256,7 @@ void Config::buildCaches() {
     mRandomCooldown     = jint(rtp, "cooldownSeconds", 120);
     mRandomMaxAttempts  = jint(rtp, "maxAttempts", 50);
     mRandomDebug        = jbool(rtp, "debug", true);
+    mRandomPreferKnown  = jbool(rtp, "preferKnownLandings", false);
 
     mBlockTpEnabled     = jbool(btp, "enabled", true);
     mBlockTpQuickAddItem           = jstr(quick, "item", "minecraft:nether_star");
@@ -358,6 +359,12 @@ bool Config::migrateLegacy() {
     if (btp != mConfig.end() && btp->is_object() && !btp->contains("editTool")) {
         (*btp)["editTool"] = defaultConfig()["blockTeleport"]["editTool"];
         changed            = true;
+    }
+    // 随机传送的选点策略同理
+    auto rtp = mConfig.find("randomTeleport");
+    if (rtp != mConfig.end() && rtp->is_object() && !rtp->contains("preferKnownLandings")) {
+        (*rtp)["preferKnownLandings"] = defaultConfig()["randomTeleport"]["preferKnownLandings"];
+        changed                       = true;
     }
     return changed;
 }

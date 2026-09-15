@@ -47,7 +47,7 @@ std::string makeAreaName(std::string const& playerName) {
     return out;
 }
 
-// 请求处理区块
+// 请求处理区块（每 tick 都会被调, 所以不打日志）
 bool requestChunkLoad(int dimid, int blockX, int blockZ) {
     auto level = ll::service::getLevel();
     if (!level) return false;
@@ -56,13 +56,8 @@ bool requestChunkLoad(int dimid, int blockX, int blockZ) {
 
     auto const cp     = ::ChunkPos(blockX >> 4, blockZ >> 4);
     auto&      source = (*dim).getChunkSource();
-    if (source.getExistingChunk(cp)) {
-        RTP_DBG("[RTP][加载] 区块 ({}, {}) 已在内存", cp.x, cp.z);
-        return true;
-    }
-    auto chunk = source.createNewChunk(cp, ::ChunkSource::LoadMode::Deferred, /*readOnly*/ false);
-    RTP_DBG("[RTP][加载] 区块 ({}, {}) → {}", cp.x, cp.z, chunk ? "引擎已接手（Deferred）" : "仍为空");
-    return chunk != nullptr;
+    if (source.getExistingChunk(cp)) return true;
+    return source.createNewChunk(cp, ::ChunkSource::LoadMode::Deferred, /*readOnly*/ false) != nullptr;
 }
 
 //加载区域
