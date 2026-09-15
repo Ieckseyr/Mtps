@@ -461,6 +461,11 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
                 s.triedTargets.size(), s.randomX, s.randomZ, RTP_CHUNK_WAIT_TICKS,
                 chunkStateName(chunkStateAt(dim, s.randomX, s.randomZ)),
                 s.reRandomLeft > 0 ? "换点重随" : "重随名额用尽, 放弃");
+        // 诊断: 区域还挂在 pending（引擎没激活它）还是已经 active（激活了但生成没跟上）
+        if (s.areaValid) {
+            rtpLogger().info("[RTP][诊断] 区域 {} 状态={}（pending=引擎未受理; active=已受理）",
+                             s.areaName, areaStillPending(level, s.areaDim, s.areaName) ? "pending" : "active");
+        }
         if (s.reRandomLeft > 0) { s.reRandomLeft--; pickNewTarget(s); return StepResult::Progress; }
         finishTeleport(s, p, false, nullptr);
         return StepResult::Done;

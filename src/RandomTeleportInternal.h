@@ -106,6 +106,7 @@ std::string makeAreaName(std::string const& playerName);
 AddTickingAreaStatus addRtpArea(Level& level, int dimid, std::string const& name,
                                 int blockX, int blockZ, int radiusChunks);
 void        removeRtpArea(Level& level, int dimid, std::string const& name);
+bool        areaStillPending(Level& level, int dimid, std::string const& name);   // 诊断用
 void        purgeStaleRtpAreas(Level& level);
 
 } // namespace mtps

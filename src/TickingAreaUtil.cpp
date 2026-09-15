@@ -68,10 +68,26 @@ AddTickingAreaStatus addRtpArea(Level& level, int dimid, std::string const& name
     bounds.mArea   = side * side;
     bounds.mVolume = side * side;
 
+    // Preload: 主动把区域内的区块加载起来（Default 只是登记, 不主动加载 —— 这就是
+    // 上一版登记成功、区块却一直 Unloaded 的原因）
     return level.getTickingAreasMgr()._addArea(
         (::DimensionType)dimid, name, bounds, /*isCircle*/ true,
         TickingAreasManager::AreaLimitCheck::None, /*isPersistent*/ false,
-        ::TickingAreaLoadMode::Default, level.getLevelStorage());
+        ::TickingAreaLoadMode::Preload, level.getLevelStorage());
+}
+
+// 诊断: 该名字的区域是否还挂在 pending 列表里（没被引擎激活）。
+// 用途: 等待超时时打印, 区分"引擎没受理/没激活"和"激活了但生成慢".
+bool areaStillPending(Level& level, int dimid, std::string const& name) {
+    try {
+        auto& mgr = level.getTickingAreasMgr();
+        auto  it  = mgr.mPendingAreas->find((::DimensionType)dimid);
+        if (it == mgr.mPendingAreas->end()) return false;
+        for (auto& pa : it->second) {
+            if (auto* n = pa.mName.operator->(); n != nullptr && *n == name) return true;
+        }
+    } catch (...) {}
+    return false;
 }
 
 // 移除 RTP 创建的常加载区域（pending + active 双路径都走, 命中即删, 引擎同步删持久化记录）
