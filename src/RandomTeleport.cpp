@@ -150,6 +150,7 @@ struct RandomTeleport::Session {
     int  loadDim{-1};
     int  loadCX{0}, loadCZ{0};         // 最近请求的区块（避免同一区块重复请求）
     int64_t loadPumpTick{0};           // 下次允许再次请求的时刻
+    int  loadFailStreak{0};            // 连续被拒次数（越界坐标等: 连败几次就换点, 不空等超时）
     int  landingCX{-1}, landingCZ{-1}; // 落点区块（传送成功后交给宽限期保持）
     // 传送成功后不立刻停止请求: 宽限期交给 GraceArea 队列处理（见 cleanupSessionArea）
     bool keepAreaAfterTeleport{false};
@@ -174,22 +175,21 @@ static std::mt19937_64& rng() { static std::mt19937_64 r{std::random_device{}()}
 
 // 区块加载管理（成员: 需要读写 Session 私有字段）
 
-// 请求引擎加载/生成 (blockX, blockZ) 所在区块（ChunkSource::getOrLoadChunk）。
+// 请求引擎把 (blockX, blockZ) 所在区块弄到内存（见 ChunkLoadUtil: getExistingChunk → createNewChunk）。
 // 同一区块 RTP_LOAD_PUMP_TICKS 内不重复请求（生成要时间, 每次调用都是引擎侧的一次查询）。
-void RandomTeleport::requestChunkLoad(Session& s, int blockX, int blockZ) {
+// 返回 false = 被拒（坐标越界 / 引擎不接受）: 这不是"生成慢", 等下去也没用, 调用方应当换点。
+bool RandomTeleport::requestChunkLoad(Session& s, int blockX, int blockZ) {
     int const cx = blockX >> 4, cz = blockZ >> 4;
     if (s.loadValid && s.loadDim == s.dimid && s.loadCX == cx && s.loadCZ == cz
         && mTickCounter < s.loadPumpTick) {
-        return;   // 刚请求过, 等引擎推进
+        return true;   // 刚请求过, 等引擎推进
     }
     s.loadValid    = true;
     s.loadDim      = s.dimid;
     s.loadCX       = cx;
     s.loadCZ       = cz;
     s.loadPumpTick = mTickCounter + RTP_LOAD_PUMP_TICKS;
-    if (!chunkLoadRequest(s.dimid, blockX, blockZ)) {
-        rtpLogger().warn("[RTP] 区块加载请求失败: ({}, {}) dim={}（本次传送可能超时）", cx, cz, s.dimid);
-    }
+    return chunkLoadRequest(s.dimid, blockX, blockZ);
 }
 
 // 会话收尾: 处理落点区块的宽限保持（结束/超时/离线/作废/关服统一走这里）。
@@ -418,7 +418,16 @@ RandomTeleport::StepResult RandomTeleport::stepProbe(Session& s, Level& level, P
         default:
             RTP_DBG("[RTP][探测] #{} ({},{}) {} → 请求引擎生成",
                     s.triedTargets.size(), s.randomX, s.randomZ, reason);
-            requestChunkLoad(s, s.randomX, s.randomZ);
+            bool const accepted = requestChunkLoad(s, s.randomX, s.randomZ);
+            s.loadFailStreak    = accepted ? 0 : s.loadFailStreak + 1;
+            if (!accepted && s.loadFailStreak >= 3) {
+                // 连世界边界都过不了（比如随机半径大到离谱）: 等下去没意义, 直接换点
+                s.loadFailStreak = 0;
+                RTP_DBG("[RTP][加载] 连续 {} 次被拒（坐标越界?）, 换点重随", 3);
+                if (s.reRandomLeft > 0) { s.reRandomLeft--; pickNewTarget(s); return StepResult::Progress; }
+                finishTeleport(s, p, false, nullptr);
+                return StepResult::Done;
+            }
             s.state = Session::LOAD_CHUNK;
             return StepResult::Waiting; // 生成中, 下 tick 轮询
     }
@@ -457,7 +466,16 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
             }
         }
 
-        requestChunkLoad(s, s.randomX, s.randomZ);   // 周期性再请求（生成要时间; 已载入时是廉价查询）
+        // 周期性再请求（生成要时间; 已在内存时只是一次廉价查询）。被拒就快速失败, 不空等超时
+        bool const accepted = requestChunkLoad(s, s.randomX, s.randomZ);
+        s.loadFailStreak    = accepted ? 0 : s.loadFailStreak + 1;
+        if (!accepted && s.loadFailStreak >= 3) {
+            s.loadFailStreak = 0;
+            RTP_DBG("[RTP][加载] 连续 {} 次被拒, 换点重随", 3);
+            if (s.reRandomLeft > 0) { s.reRandomLeft--; pickNewTarget(s); return StepResult::Progress; }
+            finishTeleport(s, p, false, nullptr);
+            return StepResult::Done;
+        }
         if (s.chunkWait % 20 == 1) {
             RTP_DBG("[RTP][等待] #{} ({},{}) 第{}tick 状态={}",
                     s.triedTargets.size(), s.randomX, s.randomZ, s.chunkWait,

@@ -24,24 +24,34 @@
 
 namespace mtps {
 
-// ── 区块加载 ───────────────────────────────────────────────────────────────
-// 让引擎加载/生成指定区块: ChunkSource::getOrLoadChunk —— 磁盘里有就载入内存, 没有就排队生成。
+// ── 区块生成/加载 ──────────────────────────────────────────────────────────
+// 让引擎把一个区块弄到内存里, 两步（顺序不能反）:
+//   1) getExistingChunk —— 已经在内存里就直接用;
+//   2) createNewChunk  —— 内存里没有: 磁盘有就从盘载入, 从来没有过就让引擎生成。
+// getOrLoadChunk 只能处理"已存在"的区块, 对从未生成过的会返回空（所以不能拿它当生成入口）。
 //
-// 注: 不能用「自建 ChunkViewSource + move」代理: 视野只是父源的一个过滤视图, 服务端只驱动
-// 它自己登记过的那些视野, 插件自建的视野 move 之后没有任何东西被加载（实测区块状态一直
-// Unloaded）。getOrLoadChunk 才是引擎自己的加载入口, 与玩家视野走同一套加载/生成流水线。
+// 另注: 也不能用「自建 ChunkViewSource + move」代理 —— 视野只是父源的一个过滤视图, 服务端
+// 只驱动它自己登记过的那些视野（玩家的）, 插件自建的视野 move 之后什么都没发生（实测区块
+// 状态一直停在 Unloaded）。
 bool chunkLoadRequest(int dimid, int blockX, int blockZ) {
     auto level = ll::service::getLevel();
     if (!level) return false;
     auto dim = level->getDimension((::DimensionType)dimid).lock();
     if (!dim) return false;
 
-    auto  chunkPos = ::ChunkPos(blockX >> 4, blockZ >> 4);
-    auto& source   = (*dim).getChunkSource();
-    // readOnly=false: 允许创建/生成（readOnly=true 只会拿已存在的）
-    auto  chunk    = source.getOrLoadChunk(chunkPos, ::ChunkSource::LoadMode::None, false);
-    RTP_DBG("[RTP][加载] 请求区块 ({}, {}) dim={} → {}", blockX >> 4, blockZ >> 4, dimid,
-            chunk ? "已受理" : "失败");
+    auto const chunkPos = ::ChunkPos(blockX >> 4, blockZ >> 4);
+    auto&      source   = (*dim).getChunkSource();
+
+    // 世界外的坐标引擎不会生成, 直接拒绝（免得白等一轮超时）
+    if (!source.isWithinWorldLimit(chunkPos)) {
+        RTP_DBG("[RTP][加载] 区块 ({}, {}) 超出世界边界, 拒绝", chunkPos.x, chunkPos.z);
+        return false;
+    }
+    if (source.getExistingChunk(chunkPos)) return true;   // 已在内存, 无需处理
+
+    auto chunk = source.createNewChunk(chunkPos, ::ChunkSource::LoadMode::None, /*readOnly*/ false);
+    RTP_DBG("[RTP][加载] 区块 ({}, {}) dim={} → {}", chunkPos.x, chunkPos.z, dimid,
+            chunk ? "已交给引擎（载入或生成）" : "失败");
     return chunk != nullptr;
 }
 

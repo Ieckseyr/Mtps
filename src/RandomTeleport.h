@@ -79,7 +79,7 @@ private:
     StepResult stepExpand(Session& s, Level& level, Player& p, Dimension& dim);
     void finishTeleport(Session& s, Player& p, bool success, SafePos const* pos);
 
-    void requestChunkLoad(Session& s, int blockX, int blockZ);   // 向引擎请求加载/生成该区块（用到 mTickCounter, 非静态）
+    bool requestChunkLoad(Session& s, int blockX, int blockZ);   // 请求引擎载入/生成该区块; false = 被拒（越界等）
     void cleanupSessionArea(Session& s);   // 非静态: 传送成功后要把落点区块挂到宽限期队列
 
     void scheduleKeepAlive(int dim, int lcx, int lcz, int delayTicks);
