@@ -29,6 +29,7 @@
 #include <mc/world/level/chunk/ChunkState.h>
 #include <mc/world/level/ChunkPos.h>
 #include <mc/world/level/ticking/ITickingArea.h>
+#include <mc/world/level/ticking/ITickingAreaView.h>
 #include <mc/world/level/ticking/PendingArea.h>
 #include <mc/world/level/ticking/TickingAreaDescription.h>
 #include <mc/world/level/ticking/TickingAreaList.h>
@@ -446,6 +447,8 @@ RandomTeleport::StepResult RandomTeleport::stepProbe(Session& s, Level& level, P
         default:
             RTP_DBG("[RTP][探测] #{} ({},{}) {} → TickingArea 生成兜底",
                     s.triedTargets.size(), s.randomX, s.randomZ, reason);
+            // 除了登记常加载区域, 再直接向引擎请求这个区块（Deferred: 允许异步生成）
+            requestChunkLoad(s.dimid, s.randomX, s.randomZ);
             ensureTickingArea(s, level, s.randomX, s.randomZ, RTP_AREA_RADIUS_CHUNKS);
             s.state = Session::LOAD_CHUNK;
             return StepResult::Waiting; // 生成中, 下 tick 轮询
@@ -461,10 +464,17 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
                 s.triedTargets.size(), s.randomX, s.randomZ, RTP_CHUNK_WAIT_TICKS,
                 chunkStateName(chunkStateAt(dim, s.randomX, s.randomZ)),
                 s.reRandomLeft > 0 ? "换点重随" : "重随名额用尽, 放弃");
-        // 诊断: 区域还挂在 pending（引擎没激活它）还是已经 active（激活了但生成没跟上）
+        // 诊断: 把引擎侧的实际情况读回来（是否激活 / 加载模式 / 完成标记 / 区域 bounds）
         if (s.areaValid) {
-            rtpLogger().info("[RTP][诊断] 区域 {} 状态={}（pending=引擎未受理; active=已受理）",
-                             s.areaName, areaStillPending(level, s.areaDim, s.areaName) ? "pending" : "active");
+            auto* area = findRtpArea(level, s.areaDim, s.areaName);
+            if (area == nullptr) {
+                rtpLogger().info("[RTP][诊断] 区域 {} 不在活动列表（pending={}）",
+                                 s.areaName, areaStillPending(level, s.areaDim, s.areaName) ? "是" : "否");
+            } else {
+                rtpLogger().info("[RTP][诊断] 区域 {} 已激活: loadMode={} preloadDone={} 加载完成={}",
+                                 s.areaName, (int)area->getLoadMode(), area->isPreloadDone() ? 1 : 0,
+                                 area->getView().isDoneLoading() ? 1 : 0);
+            }
         }
         if (s.reRandomLeft > 0) { s.reRandomLeft--; pickNewTarget(s); return StepResult::Progress; }
         finishTeleport(s, p, false, nullptr);
@@ -491,6 +501,7 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
         }
 
         ensureTickingArea(s, level, s.randomX, s.randomZ, RTP_AREA_RADIUS_CHUNKS); // 区域兜底（正常已就位）
+        requestChunkLoad(s.dimid, s.randomX, s.randomZ);   // 每 tick 推一次, 别让引擎队列空着
         if (s.chunkWait % 20 == 1) {
             RTP_DBG("[RTP][等待] #{} ({},{}) 第{}tick 状态={}",
                     s.triedTargets.size(), s.randomX, s.randomZ, s.chunkWait,

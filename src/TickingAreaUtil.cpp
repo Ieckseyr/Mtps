@@ -2,6 +2,9 @@
 
 #include <mc/util/Bounds.h>
 #include <mc/world/Pos.h>
+#include <mc/world/level/ChunkPos.h>
+#include <mc/world/level/chunk/ChunkSource.h>
+#include <mc/world/level/dimension/Dimension.h>
 
 #include <ll/api/mod/NativeMod.h>
 #include <ll/api/service/Bedrock.h>
@@ -44,6 +47,27 @@ std::string makeAreaName(std::string const& playerName) {
     return out;
 }
 
+// ── 直接请求引擎处理一个区块 ───────────────────────────────────────────────
+// 注意 LoadMode: None = 必须立刻拿到（拿不到返回空）, Deferred = 允许异步完成。
+// 之前两次都传 None 所以恒返回空 —— 对需要生成的区块那是必然的。
+// 返回 true = 引擎已接手（可能是刚生成/正在生成/已在内存）。
+bool requestChunkLoad(int dimid, int blockX, int blockZ) {
+    auto level = ll::service::getLevel();
+    if (!level) return false;
+    auto dim = level->getDimension((::DimensionType)dimid).lock();
+    if (!dim) return false;
+
+    auto const cp     = ::ChunkPos(blockX >> 4, blockZ >> 4);
+    auto&      source = (*dim).getChunkSource();
+    if (source.getExistingChunk(cp)) {
+        RTP_DBG("[RTP][加载] 区块 ({}, {}) 已在内存", cp.x, cp.z);
+        return true;
+    }
+    auto chunk = source.createNewChunk(cp, ::ChunkSource::LoadMode::Deferred, /*readOnly*/ false);
+    RTP_DBG("[RTP][加载] 区块 ({}, {}) → {}", cp.x, cp.z, chunk ? "引擎已接手（Deferred）" : "仍为空");
+    return chunk != nullptr;
+}
+
 // ── 登记常加载区域（引擎 API, 不经命令）──────────────────────────────────────
 // 这就是 /tickingarea 能生成新区块的原因: TickingAreasManager 的活动区域表**引擎每 tick 都会
 // 处理**, 区域内的区块会被真正加载并保持常加载 —— 存档里有就从盘载入, 从来没有过就生成。
@@ -55,14 +79,17 @@ std::string makeAreaName(std::string const& playerName) {
 //   - AreaLimitCheck::None: 跳过"常加载区域个数上限"（临时用途, 用完 removeRtpArea 删掉）。
 AddTickingAreaStatus addRtpArea(Level& level, int dimid, std::string const& name,
                                 int blockX, int blockZ, int radiusChunks) {
-    int const r = radiusChunks * 16;
-    // y 取 64 一格高: 区块是按整列加载的, Y 范围只决定哪些子区块被 tick —— 与命令的 circle 形式一致,
-    // 免得把整列都挂进 tick 列表白吃性能
+    // 单位注意: Bounds 的 x/z 是**区块**坐标（/tickingarea 的 circle 半径也是区块, 上限 4）, y 是方块。
+    // 之前按方块填 (±64) 在区块解释下等于半径 129 区块 = 16641 个区块的巨型区域, 引擎先忙着生成
+    // 外围、中心区块迟迟不到 → 表现为"登记成功但一直 Unloaded"。
+    int const ccx  = blockX >> 4;
+    int const ccz  = blockZ >> 4;
+    int const r    = radiusChunks;
     int const side = 2 * r + 1;
 
     ::Bounds bounds{};
-    bounds.mMin    = ::Pos{blockX - r, 64, blockZ - r};
-    bounds.mMax    = ::Pos{blockX + r, 64, blockZ + r};
+    bounds.mMin    = ::Pos{ccx - r, 64, ccz - r};
+    bounds.mMax    = ::Pos{ccx + r, 64, ccz + r};
     bounds.mDim    = ::Pos{side, 1, side};
     bounds.mSide   = side;
     bounds.mArea   = side * side;
@@ -74,6 +101,19 @@ AddTickingAreaStatus addRtpArea(Level& level, int dimid, std::string const& name
         (::DimensionType)dimid, name, bounds, /*isCircle*/ true,
         TickingAreasManager::AreaLimitCheck::None, /*isPersistent*/ false,
         ::TickingAreaLoadMode::Preload, level.getLevelStorage());
+}
+
+// 诊断: 找到活动区域（读回引擎侧的 bounds / 加载模式 / 加载进度）
+ITickingArea* findRtpArea(Level& level, int dimid, std::string const& name) {
+    try {
+        auto& mgr = level.getTickingAreasMgr();
+        auto  it  = mgr.mActiveAreas->find((::DimensionType)dimid);
+        if (it == mgr.mActiveAreas->end() || !it->second) return nullptr;
+        for (auto& a : *it->second->mTickingAreas) {
+            if (a && a->getName() == name) return a.get();
+        }
+    } catch (...) {}
+    return nullptr;
 }
 
 // 诊断: 该名字的区域是否还挂在 pending 列表里（没被引擎激活）。

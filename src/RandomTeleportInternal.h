@@ -14,6 +14,7 @@
 #include <vector>
 
 class BlockSource;
+class ITickingArea;
 class Dimension;
 class Level;
 class Player;
@@ -105,8 +106,10 @@ std::string makeAreaName(std::string const& playerName);
 // 登记常加载区域（引擎 API, 不落盘; 见 TickingAreaUtil.cpp）
 AddTickingAreaStatus addRtpArea(Level& level, int dimid, std::string const& name,
                                 int blockX, int blockZ, int radiusChunks);
+bool        requestChunkLoad(int dimid, int blockX, int blockZ);   // 直接请求引擎处理该区块（Deferred）
 void        removeRtpArea(Level& level, int dimid, std::string const& name);
-bool        areaStillPending(Level& level, int dimid, std::string const& name);   // 诊断用
+bool         areaStillPending(Level& level, int dimid, std::string const& name);   // 诊断用
+ITickingArea* findRtpArea(Level& level, int dimid, std::string const& name);       // 诊断用
 void        purgeStaleRtpAreas(Level& level);
 
 } // namespace mtps
