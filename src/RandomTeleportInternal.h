@@ -1,6 +1,6 @@
 ﻿#pragma once
 // RandomTeleport 内部共享声明: 会话状态机(RandomTeleport.cpp)、地表扫描(SurfaceScan.cpp)、
-// 区块加载(ChunkLoadUtil.cpp) 三个文件共用的常量/类型/辅助函数, 免得各自复制一份。
+// 常加载区域(TickingAreaUtil.cpp) 三个文件共用的常量/类型/辅助函数, 免得各自复制一份。
 #include "BedrockLevelReader.h"
 #include "RandomTeleport.h"
 
@@ -8,7 +8,6 @@
 #include <mc/world/level/chunk/ChunkState.h>
 
 #include <climits>
-#include <memory>
 #include <cstdint>
 #include <string>
 #include <unordered_set>
@@ -18,6 +17,7 @@ class BlockSource;
 class Dimension;
 class Level;
 class Player;
+enum class AddTickingAreaStatus : int;   // TickingAreasManager::_addArea 的返回值
 
 namespace mtps {
 
@@ -25,15 +25,14 @@ namespace mtps {
 inline constexpr int RTP_CHUNK_WAIT_TICKS      = 200;   // 生成路径: 单落点区块等待上限（tick）
 inline constexpr int RTP_SESSION_TIMEOUT_TICKS = 1200;  // 会话总超时（tick）
 inline constexpr int RTP_STEPS_PER_TICK        = 8;     // 单会话每 tick 最多连续推进步数
-inline constexpr int RTP_LOAD_RADIUS_CHUNKS    = 4;     // 主动请求生成的扩圈范围（区块）
+inline constexpr int RTP_AREA_RADIUS_CHUNKS    = 4;     // 常加载区域半径（区块, 命令上限 4）
 inline constexpr int RTP_EXPAND_MAX_RING       = 24;    // 扩圈上限（区块）
 inline constexpr int RTP_SCAN_CHUNKS_PER_TICK  = 6;     // 每 tick 最多"内存扫/存档直读"的区块数
 inline constexpr int RTP_TICK_BUDGET_MS        = 4;     // 每 tick 总时间预算（毫秒, 按会话平分）
 inline constexpr int RTP_TABLE_CHUNKS_PER_TICK = 256;   // 每 tick 最多走落点表（零 IO）的区块数
-inline constexpr int RTP_VIEW_GRACE_TICKS       = 200;   // 传送成功后落点区块的宽限保持时长（tick）
-inline constexpr int RTP_LOAD_PUMP_TICKS       = 20;    // 同一区块两次加载请求的最小间隔（tick）
+inline constexpr int RTP_AREA_GRACE_TICKS      = 200;   // 传送成功后区域的宽限保留时长（tick）
 inline constexpr int RTP_SPAWN_WAIT_TICKS      = 200;   // 出生流程未走完时的等待上限（tick）
-inline constexpr char RTP_LEGACY_AREA_PREFIX[] = "mtpsrtp_";  // 旧版 /tickingarea 区域名前缀（仅清理残留）
+inline constexpr char RTP_AREA_PREFIX[]        = "mtpsrtp_";  // 区域名前缀（清理残留用）
 
 // 日志（debug 开关在 config 的 randomTeleport.debug）
 ll::io::Logger& rtpLogger();
@@ -101,9 +100,12 @@ ChunkVerdict resolveChunk(
     SafePos& out, std::string& reason, bool& cheapOut
 );
 
-// 区块加载（ChunkSource::getOrLoadChunk 封装; 定义在 ChunkLoadUtil.cpp）
-bool chunkLoadRequest(int dimid, int blockX, int blockZ);   // 让引擎载入/生成已存在的区块
-bool chunkInWorldLimit(int dimid, int blockX, int blockZ);   // 是否在引擎允许生成的世界范围内
-void purgeLegacyTickingAreas(Level& level);                 // 清理旧版 /tickingarea 残留区域
+// 常加载区域（命令封装）
+std::string makeAreaName(std::string const& playerName);
+// 登记常加载区域（引擎 API, 不落盘; 见 TickingAreaUtil.cpp）
+AddTickingAreaStatus addRtpArea(Level& level, int dimid, std::string const& name,
+                                int blockX, int blockZ, int radiusChunks);
+void        removeRtpArea(Level& level, int dimid, std::string const& name);
+void        purgeStaleRtpAreas(Level& level);
 
 } // namespace mtps

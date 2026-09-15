@@ -1,5 +1,6 @@
 ﻿#include "TpUtil.h"
 
+
 namespace mtps {
 
 bool teleportPlayerIfReady(Player& player, Vec3 const& pos, DimensionType dim) {
