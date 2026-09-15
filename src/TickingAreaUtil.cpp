@@ -47,10 +47,7 @@ std::string makeAreaName(std::string const& playerName) {
     return out;
 }
 
-// ── 直接请求引擎处理一个区块 ───────────────────────────────────────────────
-// 注意 LoadMode: None = 必须立刻拿到（拿不到返回空）, Deferred = 允许异步完成。
-// 之前两次都传 None 所以恒返回空 —— 对需要生成的区块那是必然的。
-// 返回 true = 引擎已接手（可能是刚生成/正在生成/已在内存）。
+// 请求处理区块
 bool requestChunkLoad(int dimid, int blockX, int blockZ) {
     auto level = ll::service::getLevel();
     if (!level) return false;
@@ -68,15 +65,7 @@ bool requestChunkLoad(int dimid, int blockX, int blockZ) {
     return chunk != nullptr;
 }
 
-// ── 登记常加载区域（引擎 API, 不经命令）──────────────────────────────────────
-// 这就是 /tickingarea 能生成新区块的原因: TickingAreasManager 的活动区域表**引擎每 tick 都会
-// 处理**, 区域内的区块会被真正加载并保持常加载 —— 存档里有就从盘载入, 从来没有过就生成。
-// getOrLoadChunk / createNewChunk 都不是这条路, 对从未生成过的区块只会返回空。
-//
-// 与 /tickingarea 命令的区别（也是不用命令的原因）:
-//   - 直接调引擎 API, 不经过命令解析;
-//   - isPersistent = false: 不写进存档、重启不会被预加载、会话结束即消失;
-//   - AreaLimitCheck::None: 跳过"常加载区域个数上限"（临时用途, 用完 removeRtpArea 删掉）。
+//加载区域
 AddTickingAreaStatus addRtpArea(Level& level, int dimid, std::string const& name,
                                 int blockX, int blockZ, int radiusChunks) {
     // 单位注意: Bounds 的 x/z 是**区块**坐标（/tickingarea 的 circle 半径也是区块, 上限 4）, y 是方块。
@@ -95,15 +84,14 @@ AddTickingAreaStatus addRtpArea(Level& level, int dimid, std::string const& name
     bounds.mArea   = side * side;
     bounds.mVolume = side * side;
 
-    // Preload: 主动把区域内的区块加载起来（Default 只是登记, 不主动加载 —— 这就是
-    // 上一版登记成功、区块却一直 Unloaded 的原因）
+    // 主动把区域内的区块加载
     return level.getTickingAreasMgr()._addArea(
         (::DimensionType)dimid, name, bounds, /*isCircle*/ true,
         TickingAreasManager::AreaLimitCheck::None, /*isPersistent*/ false,
         ::TickingAreaLoadMode::Preload, level.getLevelStorage());
 }
 
-// 诊断: 找到活动区域（读回引擎侧的 bounds / 加载模式 / 加载进度）
+// debug测加载速度
 ITickingArea* findRtpArea(Level& level, int dimid, std::string const& name) {
     try {
         auto& mgr = level.getTickingAreasMgr();
@@ -116,8 +104,7 @@ ITickingArea* findRtpArea(Level& level, int dimid, std::string const& name) {
     return nullptr;
 }
 
-// 诊断: 该名字的区域是否还挂在 pending 列表里（没被引擎激活）。
-// 用途: 等待超时时打印, 区分"引擎没受理/没激活"和"激活了但生成慢".
+// debug检查是否处于加载阶段
 bool areaStillPending(Level& level, int dimid, std::string const& name) {
     try {
         auto& mgr = level.getTickingAreasMgr();
@@ -130,7 +117,7 @@ bool areaStillPending(Level& level, int dimid, std::string const& name) {
     return false;
 }
 
-// 移除 RTP 创建的常加载区域（pending + active 双路径都走, 命中即删, 引擎同步删持久化记录）
+// 移除随机传送的加载区域
 void removeRtpArea(Level& level, int dimid, std::string const& name) {
     try {
         auto& mgr     = level.getTickingAreasMgr();
@@ -148,10 +135,7 @@ void removeRtpArea(Level& level, int dimid, std::string const& name) {
         RTP_DBG("[RTP][区域] 移除 {} 失败: 未知异常", name);
     }
 }
-
-// 清理崩溃/异常残留的 RTP 区域（mtpsrtp_ 前缀, 覆盖所有维度的 pending + active; 插件首个 tick 调用一次）
-// 原理: /tickingarea 创建的区域是持久化的（存 LevelStorage, 重启会被引擎预加载）,
-// 若上次运行中途崩溃没能移除, 会在重启后继续加载区块白吃性能 —— 必须兜底清除。
+// 兜底清除。
 void purgeStaleRtpAreas(Level& level) {
     int removed = 0;
     try {
