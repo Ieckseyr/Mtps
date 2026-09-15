@@ -53,6 +53,8 @@ private:
     std::unordered_map<int64_t, std::string> mIdToPoint;
     // 每个玩家在每个点上的上次传送时刻（键 = 玩家名 + 点位名）
     std::unordered_map<std::string, int64_t> mLastUse;
+    // 交互防抖: 每个玩家在每个点上的上次交互时刻（单调时钟毫秒; 键同 mLastUse）
+    std::unordered_map<std::string, int64_t> mLastInteractMs;
 
     // 唯一创建入口（内部按载体类型分派, 收尾登记统一走 registerRuntime）
     void createCarrierForPoint(BlockTpPoint const& point);
@@ -73,6 +75,8 @@ private:
     void teleportPlayerToPoint(Player& player, BlockTpPoint const& point);
     // 交互公共逻辑（两种载体共用）
     void handleInteract(std::string const& playerName, std::string const& pointName, int action);
+    // 同一玩家 + 同一点在防抖窗口内的重复交互 → true（丢弃本次事件）
+    bool interactDebounced(std::string const& key);
 };
 
 } // namespace mtps

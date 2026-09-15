@@ -13,6 +13,7 @@
 #include <ll/api/mod/NativeMod.h>
 
 #include <cmath>
+#include <chrono>
 #include <ctime>
 #include <cstdint>
 #include <functional>
@@ -507,6 +508,10 @@ void NpcTeleport::onInteract(std::string const& domain, std::string const& playe
 
 // 交互公共逻辑（两种载体共用）: 玩家 + 点位名 → 校验后触发传送
 void NpcTeleport::handleInteract(std::string const& playerName, std::string const& pointName, int action) {
+    // 防抖放在最前面: 一次右键会连发好几个事件（右键 1 / 交互更新 4, 按住不放还会重复发包）,
+    // 不拦的话会连开好几次表单、连传好几次。键带点位名 → 换一个载体点不受影响。
+    if (interactDebounced(playerName + "|" + pointName)) return;
+
     auto level = ll::service::getLevel();
     if (!level) return;
     Player* player = level->getPlayer(playerName);
@@ -535,6 +540,26 @@ void NpcTeleport::handleInteract(std::string const& playerName, std::string cons
     if (action != 1 && action != 2) return;
 
     teleportPlayerToPoint(*player, point);
+}
+
+// 交互防抖（毫秒级, 单调时钟）: 窗口内的重复交互一律丢弃。
+// 与"点位冷却"是两件事: 冷却管的是"多长时间内不许再传", 防抖管的是"这一次点击只算一次"。
+bool NpcTeleport::interactDebounced(std::string const& key) {
+    int const windowMs = Config::getInstance().blockTpFixedCooldownMs();
+    if (windowMs <= 0) return false;   // 配置里关掉了
+
+    int64_t const now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto it = mLastInteractMs.find(key);
+    if (it != mLastInteractMs.end() && now - it->second < windowMs) return true;
+    // 表是"玩家 × 点位"规模的, 攒多了顺手扫掉过期的（1 分钟没交互的没用了）
+    if (mLastInteractMs.size() > 512) {
+        for (auto i = mLastInteractMs.begin(); i != mLastInteractMs.end();) {
+            i = (now - i->second > 60000) ? mLastInteractMs.erase(i) : std::next(i);
+        }
+    }
+    mLastInteractMs[key] = now;
+    return false;
 }
 
 void NpcTeleport::teleportPlayerToPoint(Player& player, BlockTpPoint const& point) {

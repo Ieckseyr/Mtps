@@ -96,6 +96,9 @@ Minecraft 基岩版（LeviLamina 26.40）的传送系统插件，C++ 实现。
 - `commands`：指令名，规则见上一节。
 - `skins.extraDirs`：额外的皮肤来源目录（默认指向 MHR 的皮肤目录，认其中的 `*.bin` 快照）。
 - `blockTeleport.editTool`：管理员编辑工具，`item` 填物品名（留空 = 只认蹲下）。
+- `blockTeleport.fixedCooldownMs`：NPC / 实体交互的防抖窗口（毫秒）。一次右键会连发多个事件
+  （右键 + 交互更新），窗口内的重复事件会被丢掉，免得连开好几次表单、连发好几次传送；
+  `<= 0` 关闭防抖。
 - `randomTeleport.cooldownSeconds`：全局随机传送冷却；预设自己的 `cooldown` 优先，
   `0` = 用全局、`>0` = 用该值。
 - `randomTeleport.preferKnownLandings`：选点时优先取"存档里已知安全"的已生成区块。
