@@ -80,6 +80,7 @@ private:
     void finishTeleport(Session& s, Player& p, bool success, SafePos const* pos);
 
     bool requestChunkLoad(Session& s, int blockX, int blockZ);   // 请求引擎载入/生成该区块; false = 被拒（越界等）
+    bool ensureHover(Session& s, Player& p);                     // 把玩家送到当前目标上方悬停（引擎据此生成那块地）
     void cleanupSessionArea(Session& s);   // 非静态: 传送成功后要把落点区块挂到宽限期队列
 
     void scheduleKeepAlive(int dim, int lcx, int lcz, int delayTicks);

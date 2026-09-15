@@ -55,6 +55,15 @@ bool chunkLoadRequest(int dimid, int blockX, int blockZ) {
     return chunk != nullptr;
 }
 
+// 该坐标是否在引擎允许生成的世界范围内（越界的落点等下去也没用）
+bool chunkInWorldLimit(int dimid, int blockX, int blockZ) {
+    auto level = ll::service::getLevel();
+    if (!level) return false;
+    auto dim = level->getDimension((::DimensionType)dimid).lock();
+    if (!dim) return false;
+    return (*dim).getChunkSource().isWithinWorldLimit(::ChunkPos(blockX >> 4, blockZ >> 4));
+}
+
 // ── 旧版本残留清理 ─────────────────────────────────────────────────────────
 // 早期实现用 /tickingarea 生成区块, 那些区域是**持久化**的（存 LevelStorage, 重启会被引擎
 // 预加载）。已改用 getOrLoadChunk, 但需要把老版本可能残留的区域清掉, 否则会一直白吃性能。

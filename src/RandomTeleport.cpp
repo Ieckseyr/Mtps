@@ -150,8 +150,14 @@ struct RandomTeleport::Session {
     int  loadDim{-1};
     int  loadCX{0}, loadCZ{0};         // 最近请求的区块（避免同一区块重复请求）
     int64_t loadPumpTick{0};           // 下次允许再次请求的时刻
-    int  loadFailStreak{0};            // 连续被拒次数（越界坐标等: 连败几次就换点, 不空等超时）
+
     int  landingCX{-1}, landingCZ{-1}; // 落点区块（传送成功后交给宽限期保持）
+    // "从未生成"支路: 把玩家送到目标上方悬停, 由引擎自己把这块地生成出来
+    // （JS 版验证过的做法: 玩家一到, 引擎就为他的视野加载/生成周围区块, 不需要"强制生成"接口）
+    Vec3 originPos{};                  // 会话开始时玩家的位置（悬停后失败要送回这里）
+    int  originDim{-1};
+    int  hoverY{0};
+    bool hoverMoved{false};
     // 传送成功后不立刻停止请求: 宽限期交给 GraceArea 队列处理（见 cleanupSessionArea）
     bool keepAreaAfterTeleport{false};
     int         spawnWaitTicks{0};   // 等待玩家出生流程完成的 tick 数（见 stepSession 开头）
@@ -190,6 +196,27 @@ bool RandomTeleport::requestChunkLoad(Session& s, int blockX, int blockZ) {
     s.loadCZ       = cz;
     s.loadPumpTick = mTickCounter + RTP_LOAD_PUMP_TICKS;
     return chunkLoadRequest(s.dimid, blockX, blockZ);
+}
+
+// 把玩家送到当前随机目标的上方悬停 —— 这是"从未生成过的区块"唯一的生成途径:
+// 引擎不会为插件凭空造地（getOrLoadChunk / createNewChunk 都拿不到从未生成过的区块）,
+// 但玩家一到, 引擎就会为他的视野把周围区块加载/生成出来（JS 版就是这样做的, 实测可行）。
+// 玩家位置在会话结束时会被送回原点（失败/超时/关服都算）。
+bool RandomTeleport::ensureHover(Session& s, Player& p) {
+    if (s.hoverMoved && p.getPosition().x == (float)(s.randomX + 0.5)
+        && p.getPosition().z == (float)(s.randomZ + 0.5)) {
+        return true;   // 已经悬停在当前目标上方
+    }
+    if (!teleportPlayerIfReady(p, Vec3((float)(s.randomX + 0.5), (float)s.hoverY, (float)(s.randomZ + 0.5)),
+                               (::DimensionType)s.dimid)) {
+        return false;  // 出生流程未完成: 调用方继续等
+    }
+    if (!s.hoverMoved) {
+        RTP_DBG("[RTP][悬停] 玩家 {} 送至 ({}, {}, {}) 上方, 由引擎生成该区块",
+                s.playerName, s.randomX, s.hoverY, s.randomZ);
+    }
+    s.hoverMoved = true;
+    return true;
 }
 
 // 会话收尾: 处理落点区块的宽限保持（结束/超时/离线/作废/关服统一走这里）。
@@ -287,12 +314,17 @@ void RandomTeleport::start(Player& player, RtpOptions const& opts) {
     s->usePlayerOrigin = (opts.originMode == "player");
     s->originX = opts.originX;
     s->originZ = opts.originZ;
+    s->originPos = player.getPosition();
+    s->originDim = s->dimid;
     if (s->usePlayerOrigin) { // 发起那一刻记下原点
         s->originX = std::floor(player.getPosition().x);
         s->originZ = std::floor(player.getPosition().z);
     }
     s->yRange     = getDimYRange(s->dimid);
     s->scanStartY = std::min(getScanStartY(s->dimid), s->yRange.maxY);
+    // 悬停高度（"从未生成"支路用）: 主世界 799（远高于建筑上限, 悬停期间不会落进地形）,
+    // 其他维度取扫描起点上方 30 格
+    s->hoverY = (s->dimid == 0) ? 799 : s->scanStartY + 30;
     for (auto& b : Config::getInstance().dangerBlocks()) s->dangerSet.insert(b);          // 全名（BlockSource 用）
     for (auto& b : Config::getInstance().dangerShortBlocks()) s->dangerShortSet.insert(b); // 短名（存档 palette 用）
 
@@ -324,6 +356,8 @@ void RandomTeleport::start(Player& player, RtpOptions const& opts) {
 
 // 选新随机落点（玩家原地不动, 只更新会话目标）
 void RandomTeleport::pickNewTarget(Session& s) {
+    // 注意: 本函数只算坐标; 若会话已经进入悬停模式（见 ensureHover）, 由调用方负责把玩家搬过去
+
     // 圆内随机挑点（√r 均匀分布），避开之前失败的落点
     int avoidDist = std::min(640, std::max(128, s.radius / 4));
     std::uniform_real_distribution<double> dist01(0, 1);
@@ -378,6 +412,11 @@ void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos
         RTP_DBG("[RTP][结束] {} 成功传送至 ({}, {}, {}) 耗时{}ms/{}tick 落点尝试{}次",
                 s.playerName, (int)std::floor(pos->x), (int)std::floor(pos->y), (int)std::floor(pos->z), msSince(s.startedAt), s.totalTicks, s.triedTargets.size());
     } else {
+        // 悬停模式下玩家被送上去过, 必须送回原点（否则会留在高空）
+        if (s.hoverMoved) {
+            teleportPlayerIfReady(p, s.originPos, (::DimensionType)s.originDim);
+            s.hoverMoved = false;
+        }
         sendActionbar(p, "§c没有找到安全位置");
         if (s.cost > 0 && Config::getInstance().economyEnabled()) {
             Economy::getInstance().deposit(p, s.cost);
@@ -416,18 +455,18 @@ RandomTeleport::StepResult RandomTeleport::stepProbe(Session& s, Level& level, P
             return StepResult::Progress;
         case ChunkVerdict::NoData:
         default:
-            RTP_DBG("[RTP][探测] #{} ({},{}) {} → 请求引擎生成",
-                    s.triedTargets.size(), s.randomX, s.randomZ, reason);
-            bool const accepted = requestChunkLoad(s, s.randomX, s.randomZ);
-            s.loadFailStreak    = accepted ? 0 : s.loadFailStreak + 1;
-            if (!accepted && s.loadFailStreak >= 3) {
-                // 连世界边界都过不了（比如随机半径大到离谱）: 等下去没意义, 直接换点
-                s.loadFailStreak = 0;
-                RTP_DBG("[RTP][加载] 连续 {} 次被拒（坐标越界?）, 换点重随", 3);
+            // 从未生成过: 引擎不会为插件凭空造地, 得靠玩家自己把这块地"带出来" ——
+            // 送到目标上方悬停, 引擎的视野机制就会加载/生成, 下 tick 开始轮询状态。
+            if (!chunkInWorldLimit(s.dimid, s.randomX, s.randomZ)) {
+                RTP_DBG("[RTP][探测] #{} ({},{}) 超出世界边界, 直接换点",
+                        s.triedTargets.size(), s.randomX, s.randomZ);
                 if (s.reRandomLeft > 0) { s.reRandomLeft--; pickNewTarget(s); return StepResult::Progress; }
                 finishTeleport(s, p, false, nullptr);
                 return StepResult::Done;
             }
+            RTP_DBG("[RTP][探测] #{} ({},{}) {} → 送玩家到上方悬停, 由引擎生成",
+                    s.triedTargets.size(), s.randomX, s.randomZ, reason);
+            if (!ensureHover(s, p)) return StepResult::Waiting;   // 出生流程未完成: 下 tick 再试
             s.state = Session::LOAD_CHUNK;
             return StepResult::Waiting; // 生成中, 下 tick 轮询
     }
@@ -466,16 +505,10 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
             }
         }
 
-        // 周期性再请求（生成要时间; 已在内存时只是一次廉价查询）。被拒就快速失败, 不空等超时
-        bool const accepted = requestChunkLoad(s, s.randomX, s.randomZ);
-        s.loadFailStreak    = accepted ? 0 : s.loadFailStreak + 1;
-        if (!accepted && s.loadFailStreak >= 3) {
-            s.loadFailStreak = 0;
-            RTP_DBG("[RTP][加载] 连续 {} 次被拒, 换点重随", 3);
-            if (s.reRandomLeft > 0) { s.reRandomLeft--; pickNewTarget(s); return StepResult::Progress; }
-            finishTeleport(s, p, false, nullptr);
-            return StepResult::Done;
-        }
+        // 悬停模式下玩家可能已经跟着换过点（换点重随）: 确保悬停在当前目标上方
+        if (s.hoverMoved && !ensureHover(s, p)) return StepResult::Waiting;
+        // 顺手向引擎请求一次（已存在的区块能被直接载入; 从未生成的这里拿不到, 靠玩家视野生成）
+        requestChunkLoad(s, s.randomX, s.randomZ);
         if (s.chunkWait % 20 == 1) {
             RTP_DBG("[RTP][等待] #{} ({},{}) 第{}tick 状态={}",
                     s.triedTargets.size(), s.randomX, s.randomZ, s.chunkWait,
@@ -663,8 +696,16 @@ void RandomTeleport::tick() {
     }
 }
 
-// 停止全部会话（玩家全程在原地; 加载请求不发就是不发, 没有需要显式释放的引擎资源）
+// 停止全部会话（悬停中的玩家送回原点 —— 否则关服时那个高空位置会被写进存档）
 void RandomTeleport::stopAll() {
+    if (auto level = ll::service::getLevel()) {
+        for (auto& s : mSessions) {
+            if (!s->hoverMoved) continue;
+            if (Player* p = level->getPlayer(s->playerName)) {
+                teleportPlayerIfReady(*p, s->originPos, (::DimensionType)s->originDim);
+            }
+        }
+    }
     mSessions.clear();
     mGraceAreas.clear();
 }

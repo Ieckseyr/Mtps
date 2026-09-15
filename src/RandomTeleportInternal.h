@@ -102,7 +102,8 @@ ChunkVerdict resolveChunk(
 );
 
 // 区块加载（ChunkSource::getOrLoadChunk 封装; 定义在 ChunkLoadUtil.cpp）
-bool chunkLoadRequest(int dimid, int blockX, int blockZ);   // 让引擎加载/生成该区块
+bool chunkLoadRequest(int dimid, int blockX, int blockZ);   // 让引擎载入/生成已存在的区块
+bool chunkInWorldLimit(int dimid, int blockX, int blockZ);   // 是否在引擎允许生成的世界范围内
 void purgeLegacyTickingAreas(Level& level);                 // 清理旧版 /tickingarea 残留区域
 
 } // namespace mtps
