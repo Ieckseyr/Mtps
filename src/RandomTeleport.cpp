@@ -168,6 +168,10 @@ struct RandomTeleport::Session {
     // 本 tick 的时间片截止点（tick 按会话数平分后写入）。步数预算在混合负载
     // 下不准: 落点表一次 ~ns, 内存扫一块 ~ms, 所以再加一道时间控制。
     std::chrono::steady_clock::time_point deadline{};
+    // 本 tick 已经用掉的昂贵配额（跨步累计; 每 tick 开头清零）。
+    // 内存扫一块 ≈1ms, 所以这两个数 = 每 tick 给这个会话的主线程耗时上限。
+    int tickScanUsed{0};   // 内存扫块数
+    int tickIoUsed{0};     // 存档直读块数
     // 会话开始时刻（日志里报真实耗时, debug 用）
     std::chrono::steady_clock::time_point startedAt{};
 
@@ -637,11 +641,11 @@ RandomTeleport::StepResult RandomTeleport::stepScanChunk(Session& s, Level& leve
     return StepResult::Progress;
 }
 
-// 扩圈搜索: 一圈一圈往外找安全列, 每 tick 限量
+// 扩圈搜索: 一圈一圈往外找安全列。昂贵判定（内存扫 / 存档直读）按 tick 配额限,
+// 落点表查询极便宜（一次二分）可以放心多跑; 每 tick 用完配额就把游标存下来下 tick 接着扫。
 RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, Player& p, Dimension& dim) {
     auto& ring = expandRing(s.expandRing);
-    int expensive = 0;  // 本 tick 内存扫描 + 存档直读次数（预算控制）
-    int cheapCnt  = 0;  // 本 tick 落点表命中次数（独立、宽得多的预算）
+    int cheapCnt = 0;   // 本 tick 落点表命中次数（独立、宽得多的预算）
     int pending = 0;    // 区内未就绪 chunk 数（等生成, 不耗预算）
     // 未命中的来源拆分（诊断: 区分"这片是大洋"和"这片压根没生成"）
     int memMiss = 0, tableMiss = 0, noDataMiss = 0;
@@ -659,8 +663,14 @@ RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, 
     int const ccx0 = s.randomX >> 4, ccz0 = s.randomZ >> 4;
     int i = s.expandIdx;
     for (; i < (int)ring.size(); i++) {
-        if (expensive >= RTP_SCAN_CHUNKS_PER_TICK) break;
         if (cheapCnt >= RTP_TABLE_CHUNKS_PER_TICK) break;
+        // 昂贵配额用完了: 本 tick 到此为止（游标存着, 下 tick 接着扫 —— 不跳过任何区块）。
+        // 时间片也一起看: 配额是按"块数"估的, 遇到特别大的区块不至于超支太多。
+        bool const scanFull = s.tickScanUsed >= RTP_SCAN_CHUNKS_PER_TICK;
+        bool const ioFull   = s.tickIoUsed >= RTP_IO_CHUNKS_PER_TICK;
+        bool const overTime = (s.tickScanUsed > 0 || s.tickIoUsed > 0)
+                              && std::chrono::steady_clock::now() > s.deadline;
+        if (overTime || scanFull || ioFull) break;
         int ccx = ccx0 + ring[i].dx;
         int ccz = ccz0 + ring[i].dz;
         // 区内（到圆心距离 ≤ 区域半径的圆内）但未就绪: 等生成后重扫本圈
@@ -674,7 +684,9 @@ RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, 
         ChunkSource src   = ChunkSource::None;
         ChunkVerdict v = resolveChunk(dim, s.dimid, ccx, ccz, s.yRange, s.scanStartY,
                                       s.dangerSet, s.dangerShortSet, pos, reason, cheap, &src);
-        if (cheap) cheapCnt++; else expensive++;
+        if (cheap) cheapCnt++;
+        else if (src == ChunkSource::Archive) s.tickIoUsed++;   // 读盘+解压, 单独一条配额
+        else                                  s.tickScanUsed++;  // 内存扫
         if (v == ChunkVerdict::Safe) {
             RTP_DBG("[RTP][扩圈] r={} chunk({},{}) 命中安全列 ({}, {}, {})",
                     s.expandRing, ccx, ccz, (int)pos.x, (int)pos.y, (int)pos.z);
@@ -807,6 +819,8 @@ void RandomTeleport::tick() {
     processArrivalChecks();  // 传送后核对客户端有没有真的收到落点周围的区块
     // 时间预算: 按会话数平分, 每个会话至少允许推进一步（否则会被饿死）。
     // 外层还有一道总闸: 会话多的时候"平分"会让总时间超过预算, 所以总耗时到上限就停。
+    // 另外: 真正吃时间的"内存扫一个区块"有按 tick 记的配额（见 stepExpand）, 光靠步数限制
+    // 会让"6 块 × 8 步"挤在同一 tick 里 —— 那一下就是几十毫秒的 MSPT 尖峰。
     auto const tickStart    = std::chrono::steady_clock::now();
     auto const tickLimit    = tickStart + std::chrono::milliseconds(RTP_TICK_BUDGET_MS);
     int const  sessionCount = mSessions.empty() ? 1 : (int)mSessions.size();
@@ -816,7 +830,9 @@ void RandomTeleport::tick() {
         auto& s = *it;
         // 本 tick 已经用满预算: 剩下的会话留到下个 tick（至少让第一个会话跑完一步）
         if (it != mSessions.begin() && std::chrono::steady_clock::now() > tickLimit) break;
-        s->deadline = tickStart + slice;
+        s->deadline     = tickStart + slice;
+        s->tickScanUsed = 0;
+        s->tickIoUsed   = 0;
         if (s->finished) { cleanupSessionArea(*s); it = mSessions.erase(it); continue; }
         for (int i = 0; i < RTP_STEPS_PER_TICK && !s->finished; i++) {
             if (i > 0 && std::chrono::steady_clock::now() > s->deadline) break;
@@ -833,6 +849,13 @@ void RandomTeleport::tick() {
         }
         if (s->finished) { cleanupSessionArea(*s); it = mSessions.erase(it); }
         else { ++it; }
+    }
+
+    // 本 tick 随机传送实际吃了多少主线程时间（超阈值才报, 用来盯 MSPT 尖峰）
+    int64_t const spentMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - tickStart).count();
+    if (spentMs >= RTP_TICK_WARN_MS) {
+        RTP_DBG("[RTP][开销] 本 tick 随机传送占用 {}ms（{} 个会话）", spentMs, sessionCount);
     }
 }
 

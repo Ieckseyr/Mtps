@@ -27,13 +27,20 @@ inline constexpr int RTP_CHUNK_WAIT_TICKS      = 200;   // 生成路径: 单落�
 inline constexpr int RTP_SESSION_TIMEOUT_TICKS = 1200;  // 会话总超时（tick）
 inline constexpr int RTP_STEPS_PER_TICK        = 8;     // 单会话每 tick 最多连续推进步数
 // 等区块就绪时挂的常加载区域半径（区块）。引擎是按块生成/加载的, 区域越大中心越晚轮到
-// （r=4 要处理 81 块 ≈ 50 tick, r=2 只 25 块 ≈ 13 tick）, 所以等待期只用小区域。
+// （r=4 要处理 81 块 ≈ 50 tick, r=2 只 25 块 ≈ 13 tick）, 而且一次性往生成队列塞 81 块
+// 也会把 MSPT 顶起来, 所以等待期和宽限期都用小区域。
 inline constexpr int RTP_WAIT_AREA_RADIUS_CHUNKS = 2;
-// 传送前把区域扩到这个半径, 让落点周围先加载好、传送后再留宽限期（客户端视野接管前不灰屏）
-inline constexpr int RTP_GRACE_AREA_RADIUS_CHUNKS = 4;
+// 落点用的宽限区域半径。与等待半径相同 => 常见情况根本不用另挂区域（落点已在等待区域内）,
+// 少一次"撤旧挂新"和几十块的额外生成; 玩家视野本来就会把周围拉起来。
+inline constexpr int RTP_GRACE_AREA_RADIUS_CHUNKS = 2;
 inline constexpr int RTP_EXPAND_MAX_RING       = 32;    // 扩圈上限（区块）
-inline constexpr int RTP_SCAN_CHUNKS_PER_TICK  = 6;     // 每 tick 最多"内存扫/存档直读"的区块数
-inline constexpr int RTP_TICK_BUDGET_MS        = 4;     // 每 tick 总时间预算（毫秒, 按会话平分）
+// 每个会话每 tick 的"内存扫区块"配额（硬上限, 跨步累计）。内存扫一块 ≈1ms（实测: 你日志里
+// 一圈 42 块 ~44ms）, 所以这个数就是每 tick 给随机传送的主线程毫秒预算。
+inline constexpr int RTP_SCAN_CHUNKS_PER_TICK  = 2;
+// 每个会话每 tick 的"存档直读区块"配额（读盘 + 解压, 比内存扫更贵, 单独限一条）
+inline constexpr int RTP_IO_CHUNKS_PER_TICK    = 2;
+inline constexpr int RTP_TICK_BUDGET_MS        = 2;     // 每 tick 总时间预算（毫秒, 按会话平分）
+inline constexpr int RTP_TICK_WARN_MS          = 5;     // 单 tick 超过这个耗时就在 debug 日志里报一行
 inline constexpr int RTP_TABLE_CHUNKS_PER_TICK = 512;   // 每 tick 最多走落点表（零 IO）的区块数
 inline constexpr int RTP_AREA_GRACE_TICKS      = 200;   // 传送成功后区域的宽限保留时长（tick）
 inline constexpr int RTP_SPAWN_WAIT_TICKS      = 200;   // 出生流程未走完时的等待上限（tick）
