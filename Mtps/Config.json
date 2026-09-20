@@ -1,0 +1,138 @@
+{
+  "economy": {
+    "enabled": true,
+    "type": "llmoney",
+    "scoreboardName": "money",
+    "moneyName": "RC币",
+    "costs": {
+      "publicWarp": 0,
+      "privateWarp": 50,
+      "noApprovalWarp": 50,
+      "tpa": 50,
+      "rally": 0,
+      "randomTeleport": 0
+    },
+    "teleportCost": 100
+  },
+  "teleport": {
+    "cooldownTime": 30,
+    "effectiveDuration": 60,
+    "maxPrivateWarps": 10
+  },
+  "rally": {
+    "enabled": true,
+    "duration": 60,
+    "cooldown": 60,
+    "notifySound": false
+  },
+  "defaultRules": {
+    "refuseAllTpaRequest": false,
+    "noPopUpWindow": false,
+    "refuseAllWarpRequests": false,
+    "BlockedPlayers": []
+  },
+  "logging": {
+    "logToConsole": true,
+    "broadcastToGame": true
+  },
+  "notification": {
+    "sound": {
+      "enabled": true,
+      "soundName": "mob.endermen.portal",
+      "pitch": 1,
+      "volume": 1
+    },
+    "sidebar": {
+      "enabled": true,
+      "format": "§6{type}"
+    },
+    "texts": {
+      "tpaToMe": "想传送到你身边",
+      "tpaMeTo": "想让你传送到TA身边",
+      "warpApplyType": "申请传送到您的传送点",
+      "popupTitle": "§l§6传送请求",
+      "popupContent": "§e{player}§r {type}\n\n§b请求时间: §e{time}\n§b有效时长: §e{duration}秒",
+      "crossPopupTitle": "§l§6跨服传送请求",
+      "crossPopupContent": "§d[{server}] §e{player}§r {type}\n\n§b来源服务器: §d{server}\n§b请求时间: §e{time}\n§b有效时长: §e{duration}秒",
+      "chatNotify": "§e{player}§r {type}，使用 /mtps 处理,或使用§a /y 同意 §c /n 拒绝",
+      "crossChatNotify": "§d[{server}] §e{player}§r {type}，使用 /mtps 处理,或使用§a /y 同意 §c /n 拒绝",
+      "autoStashed": "§b{player}§r 的请求已自动暂存，使用 /mtps 处理,或使用§a /y 同意 §c /n 拒绝",
+      "stashed": "§b{player}§r 的请求已暂存，使用 /mtps 处理,或使用§a /y 同意 §c /n 拒绝",
+      "crossAutoStashed": "§d[{server}] §b{player}§r 的跨服请求已自动暂存，使用 /mtps 处理,或使用§a /y 同意 §c /n 拒绝",
+      "crossStashed": "§d[{server}] §b{player}§r 的跨服请求已暂存，使用 /mtps 处理,或使用§a /y 同意 §c /n 拒绝"
+    }
+  },
+  "physicalWarpOnlyMode": false,
+  "features": {
+    "warpSystem": true,
+    "privateWarps": true,
+    "publicWarps": true,
+    "noApprovalWarps": true,
+    "playerWarpBrowser": true,
+    "tpa": true,
+    "rally": true,
+    "randomTeleport": true,
+    "crossServer": true
+  },
+  "blockTeleport": {
+    "enabled": true,
+    "quickAdd": {
+      "item": "minecraft:nether_star",
+      "requireSneak": true,
+      "requireAdmin": true,
+      "cooldownMs": 1000
+    },
+    "fixedCooldownMs": 200
+  },
+  "randomTeleport": {
+    "enabled": true,
+    "cooldownSeconds": 30,
+    "maxAttempts": 200,
+    "dangerBlocks": [
+      "minecraft:lava",
+      "minecraft:flowing_lava",
+      "minecraft:water",
+      "minecraft:flowing_water",
+      "minecraft:fire",
+      "minecraft:soul_fire",
+      "minecraft:cactus",
+      "minecraft:sweet_berry_bush",
+      "minecraft:magma_block",
+      "minecraft:wither_rose",
+      "minecraft:powder_snow"
+    ],
+    "presets": [
+      {
+        "name": "主世界随机",
+        "enabled": true,
+        "dimid": 0,
+        "message": "§a[随机传送] §f已传送到主世界随机位置！",
+        "originMode": "fixed",
+        "originX": 0,
+        "originZ": 0,
+        "radius": 500000
+      }
+    ]
+  },
+  "commands": {
+    "enabled": true,
+    "menu": "mtps",
+    "warp": "warp",
+    "private": "mywarp",
+    "tpa": "tpa",
+    "rally": "rally",
+    "rallyjoin": "rallyjoin",
+    "requests": "req",
+    "settings": "tpset",
+    "blacklist": "tpblock",
+    "admin": "tpadmin",
+    "blocktp": "blocktp",
+    "random": "tpr",
+    "public": "pubwarp",
+    "noapproval": "napwarp",
+    "browser": "pwarp",
+    "crossserver": "cswarp",
+    "accept": "y",
+    "refuse": "n"
+  }
+}

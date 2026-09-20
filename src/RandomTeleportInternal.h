@@ -48,6 +48,8 @@ inline constexpr int RTP_LANDING_HOLD_TICKS    = 40;    // 落点周围还没加
 inline constexpr int RTP_PUBLISH_RECHECK_TICKS = 2;     // 传送到位后核对客户端发布区域的间隔（tick）
 inline constexpr int RTP_PUBLISH_MAX_RETRY     = 3;     // 发布区域核对最多重试几次
 inline constexpr char RTP_AREA_PREFIX[]        = "mtpsrtp_";  // 区域名前缀（清理残留用）
+// 落点表缓存命中时不必重算; 没命中则推迟到开服稳定后再重建（别和开服抢磁盘）
+inline constexpr int RTP_LANDING_DEFER_SECONDS = 45;
 
 // 日志（debug 开关在 config 的 randomTeleport.debug）
 ll::io::Logger& rtpLogger();

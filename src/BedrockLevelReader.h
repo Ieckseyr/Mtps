@@ -68,6 +68,11 @@ public:
     // 该维度表里的 chunk 数（0 = 这一维度存档里什么都没生成, 扩圈扫了也全是无数据）
     size_t landingCountForDim(int dim) const;
 
+    // 落点表缓存: 把算好的表直接存盘/读回, 省掉整轮 .ldb 扫描 + 逐 chunk 解码
+    // （大存档要几分钟且和开服抢磁盘）。调用方用 .ldb 指纹判断缓存是否还对得上。
+    bool saveLandingsCache(std::string const& path) const;
+    bool loadLandingsCache(std::string const& path);
+
     // 反复随机抽表里的一项, 取第一个"在半径内且已有安全落点"的 chunk（拒绝采样, 零 IO）。
     // seed 由调用方给（每次调用换个随机数）; tries 用尽或表未就绪/为空返回 false。
     bool pickSafeLandingInRange(int originBX, int originBZ, int radiusBlocks, int dim,

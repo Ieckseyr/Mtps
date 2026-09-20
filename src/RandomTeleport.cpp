@@ -626,11 +626,16 @@ RandomTeleport::StepResult RandomTeleport::stepScanChunk(Session& s, Level& leve
     SafePos     pos{};
     std::string reason;
     bool        cheap = false;
+    ChunkSource src   = ChunkSource::None;
     int cx = s.randomX >> 4, cz = s.randomZ >> 4;
     if (resolveChunk(dim, s.dimid, cx, cz, s.yRange, s.scanStartY,
-                     s.dangerSet, s.dangerShortSet, pos, reason, cheap) == ChunkVerdict::Safe) {
-        RTP_DBG("[RTP][落点判定] chunk({},{}) 命中安全列 ({}, {}, {})",
-                cx, cz, (int)pos.x, (int)pos.y, (int)pos.z);
+                     s.dangerSet, s.dangerShortSet, pos, reason, cheap, &src) == ChunkVerdict::Safe) {
+        // 来源标出来: 落点表出来的落点也要走内存复核（表可能是上次开服存下来的,
+        // 玩家这期间改过地形就不能照搬）, 这一行能看到到底复核的是哪来的数据
+        RTP_DBG("[RTP][落点判定] chunk({},{}) 命中安全列 ({}, {}, {}) 来源={}",
+                cx, cz, (int)pos.x, (int)pos.y, (int)pos.z,
+                src == ChunkSource::Memory ? "内存(实时)" :
+                src == ChunkSource::Table  ? "存档落点表(已复核)" : "存档直读");
         finishTeleport(s, p, true, &pos);
         return StepResult::Done;
     }

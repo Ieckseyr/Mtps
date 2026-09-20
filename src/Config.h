@@ -29,6 +29,11 @@ public:
 
     // 数据目录
     static fs::path const& dataDir();
+    // JS 版 Mtps 的数据目录（插件目录里的 Mtps/ 子目录）: 第一次跑 C++ 版时
+    // 数据只在这儿, 需要做一次性迁移, 否则老服的传送点/配置看起来全丢了
+    static fs::path const& legacyDataDir();
+    // 把 Meowdata/Mtps/<文件名> 换算成 JS 版目录里的同一个文件
+    static fs::path legacyPathOf(fs::path const& dataPath);
     static fs::path configPath();
     static fs::path privateWarpsPath();
     static fs::path publicWarpsPath();

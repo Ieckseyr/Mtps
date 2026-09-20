@@ -34,6 +34,29 @@ DataStore& DataStore::getInstance() {
 
 json DataStore::loadJson(std::string const& path, json const& def) {
     sLastDataFile = path;   // 记录"读到哪个文件了", 上面 loadAll 的兜底日志靠它点名
+
+    // 第一次跑 C++ 版时, 数据还在 JS 版的目录里（plugins/Mtps/Mtps/*.json）:
+    // 直接读那份并顺手落一份到 Meowdata/Mtps/，否则老服的传送点/申请/设置看起来全没了。
+    // 字段格式是兼容的（见本文件 btp 段的浮动文字/随机范围兼容分支）。
+    if (!std::filesystem::exists(path)) {
+        auto const legacy = Config::legacyPathOf(std::filesystem::path(path));
+        if (std::filesystem::exists(legacy)) {
+            try {
+                std::ifstream lf(legacy);
+                json          j;
+                lf >> j;
+                saveJson(path, j);
+                ll::mod::NativeMod::current()->getLogger().info(
+                    "[数据] 已从 JS 版目录迁移: {} → {}（原文件保留）",
+                    legacy.string(), path);
+                return j;
+            } catch (std::exception const& e) {
+                ll::mod::NativeMod::current()->getLogger().warn(
+                    "[数据] JS 版文件 {} 读取失败, 按空数据继续: {}", legacy.string(), e.what());
+            }
+        }
+    }
+
     std::ifstream f(path);
     if (!f.is_open()) return def;
     try {

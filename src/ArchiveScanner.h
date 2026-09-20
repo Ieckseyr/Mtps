@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // ArchiveScanner: RTP 存档直读的后台封装（.ldb 索引 → 落点预计算, 都在后台线程）。
 // 就绪前 RTP 走原有同步路径, 所以预热期功能不受影响, 只是逐步变快。
 // 只能查到"已生成且已落盘"的区块; 运行中未保存的由 RTP 的内存层覆盖。
@@ -51,6 +51,11 @@ private:
 
     // db 目录定位: server.properties level-name → worlds/<名>/db
     static std::string resolveDbPath();
+
+    // 落点表缓存: 指纹相同（世界没变）就直接读缓存, 省掉整轮扫描 + 重算
+    static std::string ldbFingerprint();          // db 目录下 .ldb 的名字+大小+mtime 的哈希
+    static std::string cacheFilePath();           // Meowdata/Mtps/landings.cache
+    bool               tryLoadLandingsCache(std::string const& dbPath);
 
     std::unique_ptr<BedrockLevelReader> mReader;
     std::unique_ptr<std::thread>        mOpenThread;

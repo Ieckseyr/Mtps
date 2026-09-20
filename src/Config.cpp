@@ -1,4 +1,7 @@
 ﻿#include "Config.h"
+
+#include <ll/api/io/Logger.h>
+#include <ll/api/mod/NativeMod.h>
 #include <fstream>
 #include <stdexcept>
 #include <algorithm>
@@ -15,6 +18,14 @@ Config& Config::getInstance() {
 fs::path const& Config::dataDir() {
     static fs::path d = "Meowdata/Mtps";
     return d;
+}
+fs::path const& Config::legacyDataDir() {
+    static fs::path d = "plugins/Mtps/Mtps";
+    return d;
+}
+// Meowdata/Mtps/X.json → plugins/Mtps/Mtps/X.json（文件名相同, 只有目录不同）
+fs::path Config::legacyPathOf(fs::path const& dataPath) {
+    return legacyDataDir() / dataPath.filename();
 }
 fs::path Config::configPath()          { return dataDir() / "Config.json"; }
 fs::path Config::privateWarpsPath()    { return dataDir() / "PrivateWarps.json"; }
@@ -279,12 +290,38 @@ void Config::buildCaches() {
 }
 
 bool Config::load() {
+    bool migratedFromLegacy = false;
     std::error_code ec;
     fs::create_directories(dataDir(), ec);
     fs::create_directories(npcSkinsDir(), ec);
 
     auto path = configPath();
     if (!fs::exists(path)) {
+        // 第一次跑 C++ 版而老数据还在 JS 版目录里（plugins/Mtps/Mtps/）: 直接把那份配置
+        // 当成本次配置, 并落一份到 Meowdata/Mtps/ —— 不这么做, 老服的费率/开关全回到默认值
+        auto const legacy = legacyPathOf(path);
+        if (fs::exists(legacy) && fs::is_regular_file(legacy)) {
+            mConfig = defaultConfig();          // 先铺默认值, 缺的键靠它兜
+            try {
+                std::ifstream lf(legacy);
+                json            old;
+                lf >> old;
+                if (old.is_object()) {
+                    for (auto it = old.begin(); it != old.end(); ++it) mConfig[it.key()] = it.value();
+                }
+                migratedFromLegacy = true;
+            } catch (std::exception const&) {
+                mConfig = defaultConfig();
+            }
+            bool const m2 = migrateLegacy();
+            buildCaches();
+            save();
+            ll::mod::NativeMod::current()->getLogger().info(
+                "[配置] 已从 JS 版目录迁移配置: {} → {}（原文件保留, 可自行删除）",
+                legacy.string(), path.string());
+            (void)m2;
+            return true;
+        }
         mConfig = defaultConfig();
         buildCaches();
         save();

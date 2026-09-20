@@ -5,6 +5,8 @@
 #include "BedrockLevelReader.h"
 
 #include <algorithm>
+#include <cstring>
+#include <fstream>
 #include <climits>
 #include <cstdlib>
 #include <unordered_set>
@@ -297,6 +299,55 @@ bool BedrockLevelReader::buildLandings(std::vector<std::string> const& dangerSho
         if (onProgress) onProgress(doneChunks, totalChunks);
     }
 
+    mLandingsReady.store(true, std::memory_order_release);
+    return true;
+}
+
+// 落点表缓存格式:
+//   magic "MTPLDT01" | uint32 单条大小 | 每维度: uint64 条数 + 原始条目数组
+// Landing 是 POD, 同编译器/同版本直接按字节读写; 单条大小不符就整体判为不可用。
+bool BedrockLevelReader::saveLandingsCache(std::string const& path) const {
+    if (!mLandingsReady.load(std::memory_order_acquire)) return false;
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f.is_open()) return false;
+
+    char const magic[8] = {'M', 'T', 'P', 'L', 'D', 'T', '0', '1'};
+    f.write(magic, 8);
+    uint32_t const slot = (uint32_t)sizeof(Landing);
+    f.write(reinterpret_cast<char const*>(&slot), 4);
+    for (int d = 0; d < 3; d++) {
+        uint64_t const n = (uint64_t)mLandings[d].size();
+        f.write(reinterpret_cast<char const*>(&n), 8);
+        if (n > 0) {
+            f.write(reinterpret_cast<char const*>(mLandings[d].data()),
+                    (std::streamsize)(n * sizeof(Landing)));
+        }
+    }
+    return f.good();
+}
+
+bool BedrockLevelReader::loadLandingsCache(std::string const& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+
+    char     magic[8]{};
+    uint32_t slot = 0;
+    f.read(magic, 8);
+    f.read(reinterpret_cast<char*>(&slot), 4);
+    if (!f.good() || std::memcmp(magic, "MTPLDT01", 8) != 0 || slot != sizeof(Landing)) return false;
+
+    for (int d = 0; d < 3; d++) {
+        mLandings[d].clear();
+        uint64_t n = 0;
+        f.read(reinterpret_cast<char*>(&n), 8);
+        if (!f.good()) return false;
+        if (n > 200'000'000ull) return false;   // 明显不对的文件直接放弃
+        if (n > 0) {
+            mLandings[d].resize((size_t)n);
+            f.read(reinterpret_cast<char*>(mLandings[d].data()), (std::streamsize)(n * sizeof(Landing)));
+            if (!f.good()) return false;
+        }
+    }
     mLandingsReady.store(true, std::memory_order_release);
     return true;
 }
