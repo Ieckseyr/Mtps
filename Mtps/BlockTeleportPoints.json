@@ -1,1 +1,0 @@
-[{"name":"随机传送","enabled":true,"isRandom":true,"trigger":{"x":-38693,"y":66,"z":3384,"dimid":0},"randomRange":{"minX":-200000,"maxX":200000,"minZ":-200000,"maxZ":200000,"dimid":0},"message":"§a[随机传送] §f已传送！","itemFilter":[],"floatingText":{"enabled":true,"text":"§s随机传送\\n§c敲钟进行随机传送","offsetY":1}}]

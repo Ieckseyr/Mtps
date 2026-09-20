@@ -17,6 +17,8 @@
 
 #include "MtpsPapi.h"
 
+#include <windows.h>   // __try/__except + GetExceptionCode
+
 #include <algorithm>
 #include <filesystem>
 #include <cctype>
@@ -78,6 +80,34 @@ struct ActionP {
     std::string action{""};
 };
 
+// ── 出错探针 ──────────────────────────────────────────────────────────────
+// LL 的指令接口在云上会抛异常, 但 /EHa 的 catch(...) 拿不到异常码, 日志只能写"出错"。
+// 这里用一个不含 C++ 对象的独立函数 + __except 把真实的 SEH 码抓出来:
+//   0xC0000005 访问冲突 / 0xC06D007E 延迟加载找不到模块 / 0xC06D007F 找不到导出 /
+//   0xE06D7363 C++ 异常（具体文本由调用方 catch 到 what()）/ 0 = 正常
+static unsigned long probeGuard(void (*fn)(void*), void* ctx) {
+    __try {
+        fn(ctx);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return (unsigned long)GetExceptionCode();
+    }
+}
+
+// 把异常码翻成能直接看的字
+static char const* probeCodeText(unsigned long code) {
+    switch (code) {
+        case 0:          return "正常";
+        case 0xC0000005: return "0xC0000005 访问冲突";
+        case 0xC06D007E: return "0xC06D007E 延迟加载: 找不到模块";
+        case 0xC06D007F: return "0xC06D007F 延迟加载: 找不到导出函数";
+        case 0xE06D7363: return "0xE06D7363 C++ 异常";
+        case 0xC000001D: return "0xC000001D 非法指令";
+        case 0xC0000094: return "0xC0000094 整数除零";
+        default:         return "未知码";
+    }
+}
+
 // 重载配置与数据（/mtps reload 的子参数实现）
 void commandReload(CommandOutput& output) {
     DataStore::getInstance().saveAll();     // 先落盘, 免得丢掉还在合并窗口里的改动
@@ -135,7 +165,8 @@ bool Mtps::enable() {
         getSelf().getLogger().error("启用失败（异常）: {}", e.what());
         return false;
     } catch (...) {
-        getSelf().getLogger().error("启用失败（未知异常/访问冲突）");
+        getSelf().getLogger().error("启用失败（未知异常/访问冲突）；"
+                                    "上面最近的 [指令] 行就是出错的那一步");
         return false;
     }
 }
@@ -297,12 +328,28 @@ int Mtps::registerCommands() {
         // "注册指令"步骤就是崩在这）。跳过 + 明确提示, 让用户决定停用哪一边。
         // 查重本身也兜住: 万一这步在某个版本上不可用, 不能连带把后面十几条指令全废了
         bool exists = false;
-        try {
-            if (auto registry = ll::service::getCommandRegistry(false); registry) {
-                exists = (registry->findCommand(n) != nullptr);
+        {
+            struct Probe { std::string name; bool* out; std::string* what; };
+            Probe pr{n, &exists};
+            std::string what;
+            Probe       pr2{n, &exists, &what};
+            unsigned long const code = probeGuard([](void* c) {
+                auto* p2 = (Probe*)c;
+                try {
+                    if (auto registry = ll::service::getCommandRegistry(false); registry) {
+                        *p2->out = (registry->findCommand(p2->name) != nullptr);
+                    }
+                } catch (std::exception const& e) {
+                    if (p2->what) *p2->what = e.what();
+                } catch (...) {
+                    if (p2->what) *p2->what = "(非 std 异常)";
+                }
+            }, &pr2);
+            if (code != 0 || !what.empty()) {
+                getSelf().getLogger().warn("[指令] 查询 /{} 时出错（{}{}{}）, 按未占用继续", n,
+                                           probeCodeText(code),
+                                           what.empty() ? "" : "; 异常文本: ", what);
             }
-        } catch (...) {
-            getSelf().getLogger().warn("[指令] 查询 /{} 是否已被注册时出错, 按未占用继续", n);
         }
         if (exists) {
             getSelf().getLogger().warn(
@@ -327,6 +374,12 @@ int Mtps::registerCommands() {
     // 主菜单
     if (auto* cmd = mkcmd("menu", "传送系统主菜单（重载配置用 /mtps reload）", Perm::Any)) {
         registered++;
+        // 逐段打点: 云上就是崩在这一条指令的"装配参数"里 —— 分开打点才能知道是
+        // overload（建参数/注册枚举）、optional（把这些参数挂进这条指令）还是 execute（注册执行体）崩的。
+        // 注意别为了探测而多调一次 overload: 那会给同一条指令挂两份参数集。
+        // 这一整段（建参数集 → 挂到指令 → 注册执行体）就是云上崩掉的地方:
+        // 前后各打一行, 崩了就说明是这段（Overload 是右值, 拆开写会多挂一份参数集, 不能拆）
+        getSelf().getLogger().info("[指令] /mtps 开始装配参数");
         cmd->overload<ActionP>().optional("action").execute(
             [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
                 // 子参数: 重载。JS 版的重载就挂在 /mtps 下面（不是独立指令）, 名字仍可在
@@ -356,6 +409,8 @@ int Mtps::registerCommands() {
                 menu::openMainMenu(*player);
             });
     }
+        getSelf().getLogger().info("[指令] /mtps 装配参数完成");
+
     // 传送点系统
     if (auto* cmd = mkcmd("warp", "传送点系统", Perm::Any)) {
         registered++;
