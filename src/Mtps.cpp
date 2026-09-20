@@ -17,6 +17,8 @@
 
 #include "MtpsPapi.h"
 
+#include <algorithm>
+#include <cctype>
 #include <ll/api/command/CommandHandle.h>
 #include <ll/api/command/CommandRegistrar.h>
 #include <ll/api/event/EventBus.h>
@@ -74,6 +76,17 @@ Player* checkOp(CommandOrigin const& origin, CommandOutput& output) {
 struct ActionP {
     std::string action{""};
 };
+
+// 重载配置与数据（/mtps reload 的子参数实现）
+void commandReload(CommandOutput& output) {
+    DataStore::getInstance().saveAll();     // 先落盘, 免得丢掉还在合并窗口里的改动
+    bool cfgOk  = Config::getInstance().reload();
+    bool dataOk = DataStore::getInstance().loadAll();
+    skins::refresh();                       // 皮肤目录可能新增了文件, 重新扫一遍
+    papi::registerAll();                    // 格式可能变了, 重新注册占位符
+    output.success(std::string("Mtps 重载完成: 配置=") + (cfgOk ? "成功" : "失败") +
+                   " 数据=" + (dataOk ? "成功" : "失败") + " PAPI=" + papi::statusText());
+}
 
 } // namespace
 
@@ -290,10 +303,32 @@ int Mtps::registerCommands() {
     int registered = 0;
 
     // 主菜单
-    if (auto* cmd = mkcmd("menu", "打开传送系统主菜单", Perm::Any)) {
+    if (auto* cmd = mkcmd("menu", "传送系统主菜单（重载配置用 /mtps reload）", Perm::Any)) {
         registered++;
         cmd->overload<ActionP>().optional("action").execute(
-            [](CommandOrigin const& origin, CommandOutput& output, ActionP const&) {
+            [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
+                // 子参数: 重载。JS 版的重载就挂在 /mtps 下面（不是独立指令）, 名字仍可在
+                // Config.commands.reload 改（默认 reload, 旧配置里的 rld 会被自动换成它）
+                auto toLower = [](std::string v) {
+                    for (char& c : v) c = (char)std::tolower((unsigned char)c);
+                    return v;
+                };
+                auto trim = [](std::string v) {
+                    auto const notSpace = [](unsigned char c) { return !std::isspace(c); };
+                    v.erase(v.begin(), std::find_if(v.begin(), v.end(), notSpace));
+                    v.erase(std::find_if(v.rbegin(), v.rend(), notSpace).base(), v.end());
+                    return v;
+                };
+                std::string const sub = toLower(trim(p.action));
+                if (!sub.empty() && sub == toLower(trim(Config::getInstance().getCommand("reload")))) {
+                    // 重载是管理动作: 玩家需要 OP（控制台不受限, 本来就只能管理员开）
+                    if (auto* pl = playerOf(origin); pl && (int)pl->getCommandPermissionLevel() < 1) {
+                        output.error("§c权限不足（需OP）");
+                        return;
+                    }
+                    commandReload(output);
+                    return;
+                }
                 auto* player = playerOf(origin);
                 if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
                 menu::openMainMenu(*player);
@@ -412,18 +447,6 @@ int Mtps::registerCommands() {
         });
     }
     // 重载配置与数据（控制台/后台也能执行）
-    if (auto* cmd = mkcmd("reload", "Mtps: 重载配置与数据（控制台可用）", Perm::GameDirectors)) {
-        registered++;
-        cmd->overload().execute([](CommandOrigin const&, CommandOutput& output) {
-            DataStore::getInstance().saveAll();     // 先落盘, 免得丢掉还在合并窗口里的改动
-            bool cfgOk  = Config::getInstance().reload();
-            bool dataOk = DataStore::getInstance().loadAll();
-            skins::refresh();                       // 皮肤目录可能新增了文件, 重新扫一遍
-            papi::registerAll();                    // 格式可能变了, 重新注册占位符
-            output.success(std::string("Mtps 重载完成: 配置=") + (cfgOk ? "成功" : "失败") +
-                           " 数据=" + (dataOk ? "成功" : "失败") + " PAPI=" + papi::statusText());
-        });
-    }
     // 系统管理
     if (auto* cmd = mkcmd("admin", "Mtps 系统管理", Perm::GameDirectors)) {
         registered++;

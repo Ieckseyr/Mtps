@@ -90,7 +90,7 @@ json Config::defaultConfig() {
             "rally": "rally", "requests": "req", "settings": "tpset",
             "blacklist": "tpblock", "admin": "tpadmin", "blocktp": "blocktp", "random": "tpr",
             "public": "pubwarp", "noapproval": "napwarp", "browser": "pwarp", "crossserver": "cswarp",
-            "reload": "rld", "accept": "y", "refuse": "n"
+            "reload": "reload", "accept": "y", "refuse": "n"
         },
         "skins": {
             "extraDirs": [
@@ -376,6 +376,7 @@ constexpr std::pair<char const*, char const*> kLegacyCommandNames[] = {
     {"admin",       "adm"},
     {"blocktp",     "btp"},
     {"crossserver", "cs"},
+    {"reload",      "rld"},   // 重载从独立指令改成 /mtps 的子参数, 名字也回到 JS 版的 reload
 };
 } // namespace
 
