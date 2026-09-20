@@ -1,9 +1,14 @@
 ﻿#include "DataStore.h"
 #include "Config.h"
+
+#include <ll/api/io/Logger.h>
+#include <ll/api/mod/NativeMod.h>
+
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 
 namespace mtps {
 
@@ -11,6 +16,9 @@ namespace {
 
 // 合并落盘间隔（毫秒）: 期间内的多次改动合并成一次写盘
 constexpr int64_t kFlushIntervalMs = 3000;
+
+// 最近一次 loadJson 读的文件（兜底日志用它点名: "读到哪儿炸的"）
+std::string sLastDataFile;
 
 int64_t nowMs() {
     using namespace std::chrono;
@@ -25,6 +33,7 @@ DataStore& DataStore::getInstance() {
 }
 
 json DataStore::loadJson(std::string const& path, json const& def) {
+    sLastDataFile = path;   // 记录"读到哪个文件了", 上面 loadAll 的兜底日志靠它点名
     std::ifstream f(path);
     if (!f.is_open()) return def;
     try {
@@ -93,8 +102,27 @@ static json econToJson(EconomyEntry const& e) {
     return json{{"enabled", e.enabled}, {"type", e.type}, {"cost", e.cost}};
 }
 
+// 数据文件是从很早的版本 / JS 版继承下来的, 里面某个字段类型不对（例如 "name": 5、
+// "pos": "abc"）会让 nlohmann 抛 type_error。异常穿出 load() 的话 LeviLamina 只会打一行
+// "无法加载 Mtps", 完全看不出是哪个文件 —— 所以这里统一兜住, 出错就点名文件并让调用方知道。
 bool DataStore::loadAll() {
     std::lock_guard<std::mutex> lock(mMutex);
+    try {
+        return loadAllItems();
+    } catch (std::exception const& e) {
+        ll::mod::NativeMod::current()->getLogger().error(
+            "[数据] {} 里有字段类型不符, 该文件及它之后的数据本次未加载（改好该文件重启即可）: {}",
+            sLastDataFile.empty() ? "(未知文件)" : sLastDataFile, e.what());
+        return false;
+    } catch (...) {
+        ll::mod::NativeMod::current()->getLogger().error(
+            "[数据] {} 读取时出现未知异常, 该文件及它之后的数据本次未加载",
+            sLastDataFile.empty() ? "(未知文件)" : sLastDataFile);
+        return false;
+    }
+}
+
+bool DataStore::loadAllItems() {
 
     // 私人传送点（JS 版格式: { "xuid": { "private": [ {...} ] } }）
     auto pw = loadJson(Config::privateWarpsPath().string(), json::object());

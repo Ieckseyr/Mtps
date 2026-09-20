@@ -83,25 +83,50 @@ Mtps& Mtps::getInstance() {
 }
 
 bool Mtps::load() {
-    // 配置 + 数据加载
-    if (!Config::getInstance().load()) {
-        getSelf().getLogger().error("配置加载失败");
+    // 整段兜异常: 数据文件是从旧版本/JS 版继承来的, 字段类型不符会让 nlohmann 抛异常。
+    // 异常穿出去的话 LeviLamina 只会打"无法加载 Mtps", 什么原因都看不到 —— 这里至少把
+    // 原因写进日志（DataStore 内部还会点名具体是哪个 json）。
+    try {
+        // 配置 + 数据加载
+        if (!Config::getInstance().load()) {
+            getSelf().getLogger().error("配置加载失败（Meowdata/Mtps/Config.json 打不开或格式不对）");
+            return false;
+        }
+        if (!DataStore::getInstance().loadAll()) {
+            getSelf().getLogger().warn("部分数据文件加载失败（可能为首次运行, 或文件被占用）");
+        }
+        // 拼音表（可选）: Meowdata/Mtps/pinyin.txt, 供传送点模糊搜索按拼音/首字母匹配
+        loadPinyinTable();
+        if (pinyinTableLoaded()) {
+            getSelf().getLogger().info("拼音表已加载, 传送点搜索支持拼音/首字母匹配");
+        } else {
+            getSelf().getLogger().info("未找到 Meowdata/Mtps/pinyin.txt, 传送点搜索的拼音匹配已跳过");
+        }
+    } catch (std::exception const& e) {
+        getSelf().getLogger().error("加载数据时抛出异常: {}", e.what());
         return false;
-    }
-    if (!DataStore::getInstance().loadAll()) {
-        getSelf().getLogger().warn("部分数据文件加载失败（可能为首次运行）");
-    }
-    // 拼音表（可选）: Meowdata/Mtps/pinyin.txt, 供传送点模糊搜索按拼音/首字母匹配
-    loadPinyinTable();
-    if (pinyinTableLoaded()) {
-        getSelf().getLogger().info("拼音表已加载, 传送点搜索支持拼音/首字母匹配");
-    } else {
-        getSelf().getLogger().info("未找到 Meowdata/Mtps/pinyin.txt, 传送点搜索的拼音匹配已跳过");
+    } catch (...) {
+        getSelf().getLogger().error("加载数据时抛出未知异常");
+        return false;
     }
     return true;
 }
 
+// 启用阶段的兜底: 这一路要调引擎和 HologramLib, 出问题(含访问冲突, 工程用的是 /EHa)时
+// 至少把原因写进日志并让插件干净地停用, 而不是把服务器带崩
 bool Mtps::enable() {
+    try {
+        return enableInner();
+    } catch (std::exception const& e) {
+        getSelf().getLogger().error("启用失败（异常）: {}", e.what());
+        return false;
+    } catch (...) {
+        getSelf().getLogger().error("启用失败（未知异常/访问冲突）");
+        return false;
+    }
+}
+
+bool Mtps::enableInner() {
     // HologramLib 是延迟加载的（见 HoloLoad.cpp）: 先把它显式捞进来, 捞不到就明确报错,
     // 而不是让整个插件在"无法加载 Mtps"里静默消失
     if (!preloadHologramLib()) return false;

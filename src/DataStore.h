@@ -83,6 +83,8 @@ public:
 private:
     DataStore() = default;
 
+    bool loadAllItems();   // loadAll 的实际实现（外层负责加锁 + 字段类型不符时兜异常）
+
     // 数据文件位（脏标记用）
     enum FileBit : uint32_t {
         F_Private  = 1u << 0,

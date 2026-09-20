@@ -23,10 +23,13 @@ public:
 
     bool load();
     bool enable();
+
     bool disable();
 
 private:
     ll::mod::NativeMod& mSelf;
+
+    bool enableInner();   // enable 的实际实现（外层负责兜异常）
 
     bool mEnabled{false};
 
