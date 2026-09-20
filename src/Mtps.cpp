@@ -168,217 +168,16 @@ bool Mtps::enableInner() {
     }
     getSelf().getLogger().info("[启用] 4/6 交互监听就绪, 注册指令");
 
-    // 命令注册: 名字全部取自 Config.commands（留空 = 不注册该指令, 与 JS 版一致）
-    {
-        using Perm = CommandPermissionLevel;
-        auto& reg = CommandRegistrar::getInstance(false);
-        auto& cfg = Config::getInstance();
-
-        // 指令名会直接进命令解析器, 所以这里自己先校验一遍字符集; 不合法就跳过并告警
-        auto cmdName = [this, &cfg](char const* key) -> std::string {
-            std::string const n = cfg.getCommand(key);
-            if (n.empty()) return {};
-            bool ok = (std::isalpha((unsigned char)n[0]) != 0) || n[0] == '_';
-            for (char c : n) {
-                if (std::isalnum((unsigned char)c) == 0 && c != '_') { ok = false; break; }
-            }
-            if (!ok) {
-                getSelf().getLogger().warn("commands.{} 的指令名 \"{}\" 不合法（只能用字母/数字/下划线）, 已跳过", key, n);
-                return {};
-            }
-            if (n.size() > 4) {
-                getSelf().getLogger().warn("指令 /{} (commands.{}) 超过 4 个字母, 建议改短", n, key);
-            }
-            return n;
-        };
-        // desc 里的 {cmd} 会换成 "/实际指令名", 免得提示文案写死名字
-        // 重名直接跳过并告警: 指令名现在是用户可编辑的, 两个功能挤在同一个名字上会互相抢重载
-        std::set<std::string> usedNames;
-        auto mkcmd = [&](char const* key, std::string desc, Perm perm) -> CommandHandle* {
-            std::string const n = cmdName(key);
-            if (n.empty()) return nullptr;
-            if (!usedNames.insert(n).second) {
-                getSelf().getLogger().warn("指令名 /{} 被多个 commands.* 同时使用, 已跳过 commands.{}", n, key);
-                return nullptr;
-            }
-            if (auto p = desc.find("{cmd}"); p != std::string::npos) desc.replace(p, 5, "/" + n);
-            return &reg.getOrCreateCommand(n, desc, perm);
-        };
-        int registered = 0;
-
-        // 主菜单
-        if (auto* cmd = mkcmd("menu", "打开传送系统主菜单", Perm::Any)) {
-            registered++;
-            cmd->overload<ActionP>().optional("action").execute(
-                [](CommandOrigin const& origin, CommandOutput& output, ActionP const&) {
-                    auto* player = playerOf(origin);
-                    if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                    menu::openMainMenu(*player);
-                });
-        }
-        // 传送点系统
-        if (auto* cmd = mkcmd("warp", "传送点系统", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::openWarpMenu(*player);
-            });
-        }
-        // 我的传送点
-        if (auto* cmd = mkcmd("private", "我的传送点（可用: {cmd} 编号 直达）", Perm::Any)) {
-            registered++;
-            cmd->overload<ActionP>().optional("action").execute(
-                [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
-                    auto* player = playerOf(origin);
-                    if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                    menu::openPrivateWarpMenu(*player, p.action);
-                });
-        }
-        // 玩家互传
-        if (auto* cmd = mkcmd("tpa", "玩家互传", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::openTpaSelectForm(*player);
-            });
-        }
-        // 随机传送
-        if (auto* cmd = mkcmd("random", "随机传送（可用: {cmd} 编号 直达预设）", Perm::Any)) {
-            registered++;
-            cmd->overload<ActionP>().optional("action").execute(
-                [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
-                    auto* player = playerOf(origin);
-                    if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                    menu::openRandomTeleportMenu(*player, p.action);
-                });
-        }
-        // 公共传送点
-        if (auto* cmd = mkcmd("public", "公共传送点（可用: {cmd} 编号 直达）", Perm::Any)) {
-            registered++;
-            cmd->overload<ActionP>().optional("action").execute(
-                [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
-                    auto* player = playerOf(origin);
-                    if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                    menu::openPublicWarpQuickList(*player, p.action);
-                });
-        }
-        // 免申请传送点
-        if (auto* cmd = mkcmd("noapproval", "免申请传送点（可用: {cmd} 编号 直达）", Perm::Any)) {
-            registered++;
-            cmd->overload<ActionP>().optional("action").execute(
-                [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
-                    auto* player = playerOf(origin);
-                    if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                    menu::openNoApprovalWarpsList(*player, p.action);
-                });
-        }
-
-        // 发起召集（已在召集中的发起者再执行 = 取消）
-        if (auto* cmd = mkcmd("rally", "发起/取消召集传送", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::startRally(*player);
-            });
-        }
-        // 请求管理
-        if (auto* cmd = mkcmd("requests", "请求管理", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::openRequestManageForm(*player);
-            });
-        }
-        // 个人设置
-        if (auto* cmd = mkcmd("settings", "个人设置", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::openPersonalSettingsForm(*player);
-            });
-        }
-        // 黑名单管理
-        if (auto* cmd = mkcmd("blacklist", "黑名单管理（名单里的玩家不能向我发起传送）", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::openBlacklistForm(*player);
-            });
-        }
-        // 同意 / 拒绝（同意也用于响应召集）
-        if (auto* cmd = mkcmd("accept", "同意传送请求 / 加入召集", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::acceptTeleportRequest(*player);
-            });
-        }
-        if (auto* cmd = mkcmd("refuse", "拒绝传送请求", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::refuseTeleportRequest(*player);
-            });
-        }
-        // 重载配置与数据（控制台/后台也能执行）
-        if (auto* cmd = mkcmd("reload", "Mtps: 重载配置与数据（控制台可用）", Perm::GameDirectors)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const&, CommandOutput& output) {
-                DataStore::getInstance().saveAll();     // 先落盘, 免得丢掉还在合并窗口里的改动
-                bool cfgOk  = Config::getInstance().reload();
-                bool dataOk = DataStore::getInstance().loadAll();
-                skins::refresh();                       // 皮肤目录可能新增了文件, 重新扫一遍
-                papi::registerAll();                    // 格式可能变了, 重新注册占位符
-                output.success(std::string("Mtps 重载完成: 配置=") + (cfgOk ? "成功" : "失败") +
-                               " 数据=" + (dataOk ? "成功" : "失败") + " PAPI=" + papi::statusText());
-            });
-        }
-        // 系统管理
-        if (auto* cmd = mkcmd("admin", "Mtps 系统管理", Perm::GameDirectors)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::openAdminSettingsMenu(*player);
-            });
-        }
-        // NPC 传送点管理
-        if (auto* cmd = mkcmd("blocktp", "NPC传送点管理", Perm::GameDirectors)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::openBlockTpMenu(*player);
-            });
-        }
-        // 玩家传送点浏览
-        if (auto* cmd = mkcmd("browser", "玩家传送点浏览", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::openPublicWarpBrowser(*player);
-            });
-        }
-        // 跨服传送
-        if (auto* cmd = mkcmd("crossserver", "跨服传送", Perm::Any)) {
-            registered++;
-            cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
-                auto* player = playerOf(origin);
-                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
-                menu::openCrossServerList(*player);
-            });
-        }
-
-        getSelf().getLogger().info("已注册 {} 个指令（名字来自 Config.commands, 留空即不注册）", registered);
+    // 指令注册单独兜一层: 命令注册表没就绪 / 版本不匹配都会在这里出访问冲突,
+    // 不该让整个插件跟着停用 —— 记下条数, 等服务器 tick 起来后再重试几次
+    try {
+        mRegisteredCommands = registerCommands();
+    } catch (...) {
+        mRegisteredCommands = 0;
+    }
+    if (mRegisteredCommands == 0) {
+        mCommandRetryLeft = 10;   // 每秒重试一次, 最多 10 次
+        getSelf().getLogger().warn("[启用] 指令注册未成功, 稍后自动重试（期间传送功能照常, 只是指令暂时不可用）");
     }
 
     // tick 驱动: 随机传送扫描 + TPA 超时清理 + 召集超时
@@ -389,10 +188,12 @@ bool Mtps::enableInner() {
                 sFirstTick = false;
                 getSelf().getLogger().info("tick 事件已触发（事件 ID 对齐补丁生效）");
             }
+            mTicks++;
             RandomTeleport::getInstance().tick();
             NpcTeleport::getInstance().tick();   // 虚假实体"逐客户端看向自己"
             TpaRally::getInstance().tick();
             tpGuardTick();   // 记录各玩家维度变化（跨维度切换中禁止传送, 防幽灵状态刷物）
+            if (mCommandRetryLeft > 0) retryRegisterCommands();   // 启用时没注册上指令 → 每秒补一次
             DataStore::getInstance().tick();   // 到期把脏数据文件合并落盘（每 3 秒最多一次）
         }
     );
@@ -413,6 +214,247 @@ bool Mtps::enableInner() {
     getSelf().getLogger().info("Mtps C++ 版已启用（随机传送四级数据源: 内存/落点表/存档直读/区块视野生成）");
     mEnabled = true;
     return true;
+}
+
+
+// 指令注册（从 enableInner 拆出来单独兜异常）: 命令注册表此刻没就绪 / LL 版本不匹配时,
+// 不该让整个插件停用 —— 失败就把条数留成 0, 由 tick 侧重试几次。
+int Mtps::registerCommands() {
+    using Perm = CommandPermissionLevel;
+    getSelf().getLogger().info("[启用] 4.1/6 取 CommandRegistrar");
+    auto& reg = CommandRegistrar::getInstance(false);
+    getSelf().getLogger().info("[启用] 4.2/6 CommandRegistrar 就绪, 开始逐条注册指令");
+    auto& cfg = Config::getInstance();
+
+    // 指令名会直接进命令解析器, 所以这里自己先校验一遍字符集; 不合法就跳过并告警
+    auto cmdName = [this, &cfg](char const* key) -> std::string {
+        std::string const n = cfg.getCommand(key);
+        if (n.empty()) return {};
+        bool ok = (std::isalpha((unsigned char)n[0]) != 0) || n[0] == '_';
+        for (char c : n) {
+            if (std::isalnum((unsigned char)c) == 0 && c != '_') { ok = false; break; }
+        }
+        if (!ok) {
+            getSelf().getLogger().warn("commands.{} 的指令名 \"{}\" 不合法（只能用字母/数字/下划线）, 已跳过", key, n);
+            return {};
+        }
+        if (n.size() > 4) {
+            getSelf().getLogger().warn("指令 /{} (commands.{}) 超过 4 个字母, 建议改短", n, key);
+        }
+        return n;
+    };
+    // desc 里的 {cmd} 会换成 "/实际指令名", 免得提示文案写死名字
+    // 重名直接跳过并告警: 指令名现在是用户可编辑的, 两个功能挤在同一个名字上会互相抢重载
+    std::set<std::string> usedNames;
+    auto mkcmd = [&](char const* key, std::string desc, Perm perm) -> CommandHandle* {
+        std::string const n = cmdName(key);
+        if (n.empty()) return nullptr;
+        if (!usedNames.insert(n).second) {
+            getSelf().getLogger().warn("指令名 /{} 被多个 commands.* 同时使用, 已跳过 commands.{}", n, key);
+            return nullptr;
+        }
+        if (auto p = desc.find("{cmd}"); p != std::string::npos) desc.replace(p, 5, "/" + n);
+        getSelf().getLogger().info("[指令] 注册 /{} (commands.{}) ...", n, key);
+        CommandHandle* h = &reg.getOrCreateCommand(n, desc, perm);
+        getSelf().getLogger().info("[指令] /{} 句柄就绪, 装配参数", n);
+        return h;
+    };
+    int registered = 0;
+
+    // 主菜单
+    if (auto* cmd = mkcmd("menu", "打开传送系统主菜单", Perm::Any)) {
+        registered++;
+        cmd->overload<ActionP>().optional("action").execute(
+            [](CommandOrigin const& origin, CommandOutput& output, ActionP const&) {
+                auto* player = playerOf(origin);
+                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+                menu::openMainMenu(*player);
+            });
+    }
+    // 传送点系统
+    if (auto* cmd = mkcmd("warp", "传送点系统", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::openWarpMenu(*player);
+        });
+    }
+    // 我的传送点
+    if (auto* cmd = mkcmd("private", "我的传送点（可用: {cmd} 编号 直达）", Perm::Any)) {
+        registered++;
+        cmd->overload<ActionP>().optional("action").execute(
+            [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
+                auto* player = playerOf(origin);
+                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+                menu::openPrivateWarpMenu(*player, p.action);
+            });
+    }
+    // 玩家互传
+    if (auto* cmd = mkcmd("tpa", "玩家互传", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::openTpaSelectForm(*player);
+        });
+    }
+    // 随机传送
+    if (auto* cmd = mkcmd("random", "随机传送（可用: {cmd} 编号 直达预设）", Perm::Any)) {
+        registered++;
+        cmd->overload<ActionP>().optional("action").execute(
+            [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
+                auto* player = playerOf(origin);
+                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+                menu::openRandomTeleportMenu(*player, p.action);
+            });
+    }
+    // 公共传送点
+    if (auto* cmd = mkcmd("public", "公共传送点（可用: {cmd} 编号 直达）", Perm::Any)) {
+        registered++;
+        cmd->overload<ActionP>().optional("action").execute(
+            [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
+                auto* player = playerOf(origin);
+                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+                menu::openPublicWarpQuickList(*player, p.action);
+            });
+    }
+    // 免申请传送点
+    if (auto* cmd = mkcmd("noapproval", "免申请传送点（可用: {cmd} 编号 直达）", Perm::Any)) {
+        registered++;
+        cmd->overload<ActionP>().optional("action").execute(
+            [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
+                auto* player = playerOf(origin);
+                if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+                menu::openNoApprovalWarpsList(*player, p.action);
+            });
+    }
+
+    // 发起召集（已在召集中的发起者再执行 = 取消）
+    if (auto* cmd = mkcmd("rally", "发起/取消召集传送", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::startRally(*player);
+        });
+    }
+    // 请求管理
+    if (auto* cmd = mkcmd("requests", "请求管理", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::openRequestManageForm(*player);
+        });
+    }
+    // 个人设置
+    if (auto* cmd = mkcmd("settings", "个人设置", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::openPersonalSettingsForm(*player);
+        });
+    }
+    // 黑名单管理
+    if (auto* cmd = mkcmd("blacklist", "黑名单管理（名单里的玩家不能向我发起传送）", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::openBlacklistForm(*player);
+        });
+    }
+    // 同意 / 拒绝（同意也用于响应召集）
+    if (auto* cmd = mkcmd("accept", "同意传送请求 / 加入召集", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::acceptTeleportRequest(*player);
+        });
+    }
+    if (auto* cmd = mkcmd("refuse", "拒绝传送请求", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::refuseTeleportRequest(*player);
+        });
+    }
+    // 重载配置与数据（控制台/后台也能执行）
+    if (auto* cmd = mkcmd("reload", "Mtps: 重载配置与数据（控制台可用）", Perm::GameDirectors)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const&, CommandOutput& output) {
+            DataStore::getInstance().saveAll();     // 先落盘, 免得丢掉还在合并窗口里的改动
+            bool cfgOk  = Config::getInstance().reload();
+            bool dataOk = DataStore::getInstance().loadAll();
+            skins::refresh();                       // 皮肤目录可能新增了文件, 重新扫一遍
+            papi::registerAll();                    // 格式可能变了, 重新注册占位符
+            output.success(std::string("Mtps 重载完成: 配置=") + (cfgOk ? "成功" : "失败") +
+                           " 数据=" + (dataOk ? "成功" : "失败") + " PAPI=" + papi::statusText());
+        });
+    }
+    // 系统管理
+    if (auto* cmd = mkcmd("admin", "Mtps 系统管理", Perm::GameDirectors)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::openAdminSettingsMenu(*player);
+        });
+    }
+    // NPC 传送点管理
+    if (auto* cmd = mkcmd("blocktp", "NPC传送点管理", Perm::GameDirectors)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::openBlockTpMenu(*player);
+        });
+    }
+    // 玩家传送点浏览
+    if (auto* cmd = mkcmd("browser", "玩家传送点浏览", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::openPublicWarpBrowser(*player);
+        });
+    }
+    // 跨服传送
+    if (auto* cmd = mkcmd("crossserver", "跨服传送", Perm::Any)) {
+        registered++;
+        cmd->overload().execute([](CommandOrigin const& origin, CommandOutput& output) {
+            auto* player = playerOf(origin);
+            if (!player) { output.error("§c此命令仅限玩家执行！"); return; }
+            menu::openCrossServerList(*player);
+        });
+    }
+
+    getSelf().getLogger().info("已注册 {} 个指令（名字来自 Config.commands, 留空即不注册）", registered);
+    return registered;
+}
+// 指令注册的重试: 只在"一条都没注册上"时才重试（那种情况说明注册表本身还没就绪,
+// 重试是安全的）; 中途崩的说明已经部分注册过, 再注册会重复加重载, 就不折腾了。
+void Mtps::retryRegisterCommands() {
+    if ((mTicks % 20) != 0) return;   // 每秒一次
+    mCommandRetryLeft--;
+    int n = 0;
+    try {
+        n = registerCommands();
+    } catch (...) {
+        n = 0;
+    }
+    if (n > 0) {
+        mRegisteredCommands = n;
+        mCommandRetryLeft   = 0;
+        getSelf().getLogger().info("[启用] 指令注册补上了: {} 条", n);
+    } else if (mCommandRetryLeft <= 0) {
+        getSelf().getLogger().error("[启用] 指令注册始终失败（引擎命令注册表不可用或 LeviLamina 版本不匹配）;"
+                                    " 传送等功能不受影响, 但 /命令 用不了");
+    }
 }
 
 bool Mtps::disable() {
