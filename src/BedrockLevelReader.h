@@ -58,8 +58,10 @@ public:
 
     // 后台预计算（要读盘, 必须放后台线程; 可用 requestCancel 中断）
     // dangerShort: 危险方块短名（无 minecraft: 前缀）; onProgress 可空
+    // maxChunks: 预计算落点上限（chunk 数, 0 = 不限制）—— 大存档用它限制扫描量与内存
     bool buildLandings(std::vector<std::string> const& dangerShort,
-                       std::function<void(size_t, size_t)> const& onProgress);
+                       std::function<void(size_t, size_t)> const& onProgress,
+                       size_t maxChunks = 0);
 
     // 查表: 返回 false = 存档里没有该 chunk（从未生成, 或表尚未覆盖）
     bool lookupLanding(int cx, int cz, int dim, Landing& out) const;
@@ -78,6 +80,8 @@ public:
     bool pickSafeLandingInRange(int originBX, int originBZ, int radiusBlocks, int dim,
                                 uint64_t seed, Landing& out, int tries = 128) const;
     bool   landingsReady() const { return mLandingsReady.load(std::memory_order_acquire); }
+    // 上次预计算是否因为到达上限而提前停止（日志用）
+    bool   landingsCapped() const { return mLandingsCapped; }
 
     // 请求中断（open 的并行扫描 / buildLandings 都会尽快退出）
     void requestCancel() { mCancel.store(true, std::memory_order_release); }
@@ -258,6 +262,7 @@ private:
     // 落点预计算表（buildLandings 填充; 完成后只读）
     std::vector<Landing> mLandings[3];        // 按 (cx, cz) 升序, 每维一张
     std::atomic<bool>    mLandingsReady{false};
+    bool                 mLandingsCapped{false};
     std::atomic<bool>    mCancel{false};
 
     // subchunk 逐列探测结果（surface-only 解码: 不物化 4096 索引、不构造 palette 字符串副本）

@@ -85,6 +85,7 @@ Minecraft 基岩版（LeviLamina 26.40）的传送系统插件，C++ 实现。
   "randomTeleport": {
     "cooldownSeconds": 120,
     "preferKnownLandings": false,
+    "precompute": { "enabled": true, "maxLandings": 0 },
     "presets": [
       { "name": "主世界随机", "radius": 1000, "dimid": 0, "cooldown": 0 }
     ]
@@ -112,6 +113,10 @@ Minecraft 基岩版（LeviLamina 26.40）的传送系统插件，C++ 实现。
   `<= 0` 关闭防抖。
 - `randomTeleport.cooldownSeconds`：全局随机传送冷却；预设自己的 `cooldown` 优先，
   `0` = 用全局、`>0` = 用该值。
+- `randomTeleport.precompute`：落点表预计算的开关与上限。
+  `enabled: false` = 完全不碰存档（不建索引、不扫 `.ldb`、不读缓存），随机传送只走内存 + 区块生成；
+  `maxLandings` = 预计算落点上限（chunk 数，`0` = 不限制，每个约 16 字节内存）。
+  大存档想压开服时间/内存就调这两个；改了上限会自动重算并覆盖缓存。
 - `randomTeleport.preferKnownLandings`：选点时优先取"存档里已知安全"的已生成区块。
   打开后传送基本是即时的（不用等地形生成），代价是落点只会落在已探索范围内；
   关（默认）时仍按圆盘均匀随机选点，适合想让玩家散到新地形的服。

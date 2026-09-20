@@ -156,9 +156,15 @@ void BedrockLevelReader::decodeSubchunkColumns(const uint8_t* data, size_t size,
 }
 
 bool BedrockLevelReader::buildLandings(std::vector<std::string> const& dangerShort,
-                                       std::function<void(size_t, size_t)> const& onProgress) {
+                                       std::function<void(size_t, size_t)> const& onProgress,
+                                       size_t maxChunks) {
     if (!mOpened) return false;
     if (cancelled()) return false;
+
+    // 上限是"跨维度的总 chunk 数"（0 = 不限制）; 到了就停, 剩下的 chunk 不预计算,
+    // RTP 对它们照常走内存/存档直读/生成, 只是没有零 IO 的快路径。
+    size_t builtTotal = 0;
+    bool   capped     = false;
 
     std::unordered_set<std::string> dangerSet;
     dangerSet.reserve(dangerShort.size() * 2 + 1);
@@ -173,7 +179,7 @@ bool BedrockLevelReader::buildLandings(std::vector<std::string> const& dangerSho
     std::vector<SubRef> subs;
     subs.reserve(32);
 
-    for (int dim = 0; dim <= 2; dim++) {
+    for (int dim = 0; dim <= 2 && !capped; dim++) {
         auto& table = mLandings[dim];
         table.clear();
         if (cancelled()) return false;
@@ -286,9 +292,15 @@ bool BedrockLevelReader::buildLandings(std::vector<std::string> const& dangerSho
                 ld.state = LAND_NO_SAFE;
             }
             table.push_back(ld);
+            ++builtTotal;
 
             doneChunks++;
             if (onProgress && (doneChunks & 0xFFF) == 0) onProgress(doneChunks, totalChunks);
+
+            if (maxChunks > 0 && builtTotal >= maxChunks) {   // 到上限: 停在这里
+                capped = true;
+                break;
+            }
         }
 
         // 索引按 key 字节序排列（cx/cz 小端逐字节比较, 与数值序不同）→ 重排后才能二分
@@ -299,6 +311,7 @@ bool BedrockLevelReader::buildLandings(std::vector<std::string> const& dangerSho
         if (onProgress) onProgress(doneChunks, totalChunks);
     }
 
+    mLandingsCapped = capped;
     mLandingsReady.store(true, std::memory_order_release);
     return true;
 }

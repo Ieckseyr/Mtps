@@ -85,6 +85,10 @@ public:
     bool        randomDebug() const { return mRandomDebug; }
     // 选点是否总是优先取"存档里已知安全"的已生成 chunk（关 = 首次仍按圆盘均匀随机, 重随时才用）
     bool        randomPreferKnown() const { return mRandomPreferKnown; }
+    // 落点表（预计算）: 关掉就完全不扫存档, RTP 只走内存/生成路径
+    bool        landingPrecomputeEnabled() const { return mLandPrecomputeEnabled; }
+    // 预计算落点上限（chunk 数; 0 = 不限制）: 大存档用来限制扫描量与内存（每 chunk 约 16 字节）
+    int         landingPrecomputeMax() const { return mLandPrecomputeMax; }
     std::vector<std::string> const& dangerBlocks() const;
     // 危险方块短名（已剥离 minecraft: 前缀, 存档 palette 用）
     std::vector<std::string> const& dangerShortBlocks() const;
@@ -182,6 +186,8 @@ private:
     int  mRandomMaxAttempts{50};
     bool mRandomDebug{true};
     bool mRandomPreferKnown{false};
+    bool mLandPrecomputeEnabled{true};
+    int  mLandPrecomputeMax{0};
     bool mBlockTpEnabled{true};
     std::string mBlockTpQuickAddItem{"minecraft:nether_star"};
     bool mBlockTpQuickAddRequireSneak{true};

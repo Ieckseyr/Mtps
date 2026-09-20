@@ -76,6 +76,7 @@ json Config::defaultConfig() {
         "randomTeleport": {
             "enabled": true, "cooldownSeconds": 120, "maxAttempts": 50,
             "debug": true, "preferKnownLandings": false,
+            "precompute": { "enabled": true, "maxLandings": 0 },
             "dangerBlocks": [ "minecraft:lava","minecraft:flowing_lava","minecraft:water","minecraft:flowing_water",
                 "minecraft:fire","minecraft:soul_fire","minecraft:cactus","minecraft:sweet_berry_bush",
                 "minecraft:magma_block","minecraft:wither_rose","minecraft:powder_snow" ],
@@ -296,6 +297,11 @@ void Config::buildCaches() {
     mRandomDebug        = jbool(rtp, "debug", true);
     mRandomPreferKnown  = jbool(rtp, "preferKnownLandings", false);
 
+    // 落点表预计算: 是否启用 + 预计算落点上限（chunk 数, 0 = 不限制）
+    auto const& pre = subOf(rtp, "precompute");
+    mLandPrecomputeEnabled = jbool(pre, "enabled", true);
+    mLandPrecomputeMax     = std::max(0, jint(pre, "maxLandings", 0));
+
     mBlockTpEnabled     = jbool(btp, "enabled", true);
     mBlockTpQuickAddItem           = jstr(quick, "item", "minecraft:nether_star");
     mBlockTpQuickAddRequireSneak   = jbool(quick, "requireSneak", true);
@@ -407,6 +413,11 @@ bool Config::migrateLegacy() {
     if (rtp != mConfig.end() && rtp->is_object() && !rtp->contains("preferKnownLandings")) {
         (*rtp)["preferKnownLandings"] = defaultConfig()["randomTeleport"]["preferKnownLandings"];
         changed                       = true;
+    }
+    // 落点表预计算的开关与上限同理
+    if (rtp != mConfig.end() && rtp->is_object() && !rtp->contains("precompute")) {
+        (*rtp)["precompute"] = defaultConfig()["randomTeleport"]["precompute"];
+        changed              = true;
     }
     return changed;
 }

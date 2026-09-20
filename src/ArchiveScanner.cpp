@@ -89,10 +89,15 @@ bool ArchiveScanner::tryLoadLandingsCache(std::string const& dbPath) {
 
     std::ifstream cf(cache + ".meta");
     if (!cf.is_open()) return false;
-    std::string cachedFp, cachedDb;
+    std::string cachedFp, cachedDb, cachedMax;
     std::getline(cf, cachedFp);
     std::getline(cf, cachedDb);
-    if (cachedFp != fp || cachedDb != dbPath) return false;
+    std::getline(cf, cachedMax);
+    // 上限也一起比: 改了 maxLandings 就该重算（否则缓存永远是旧的规模）
+    if (cachedFp != fp || cachedDb != dbPath
+        || cachedMax != std::to_string(Config::getInstance().landingPrecomputeMax())) {
+        return false;
+    }
 
     auto reader = std::make_unique<BedrockLevelReader>(dbPath);
     if (!reader->loadLandingsCache(cache)) return false;
@@ -109,6 +114,13 @@ bool ArchiveScanner::tryLoadLandingsCache(std::string const& dbPath) {
 
 void ArchiveScanner::startAsync() {
     if (mOpenThread) return; // 已启动（幂等）
+
+    // 配置关掉预计算: 完全不碰存档（不建索引、不扫 .ldb、不读缓存）, RTP 走内存/生成路径
+    if (!Config::getInstance().landingPrecomputeEnabled()) {
+        scannerLogger().info("[RTP][落点表] 预计算已关闭（randomTeleport.precompute.enabled=false）, "
+                             "随机传送走内存/区块生成路径");
+        return;
+    }
 
     mStopping.store(false, std::memory_order_release);
     auto dbPath = resolveDbPath();
@@ -174,22 +186,27 @@ void ArchiveScanner::startAsync() {
                                              std::chrono::duration_cast<std::chrono::milliseconds>(
                                                  std::chrono::steady_clock::now() - start).count());
                     }
-                });
+                },
+                (size_t)Config::getInstance().landingPrecomputeMax());
         } catch (...) {
             built = false;
         }
         auto ms2 = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t2).count();
         if (built) {
-            scannerLogger().info("[RTP][落点表] 预计算完成({}ms): {} 个 chunk 已可零 IO 查询"
+            scannerLogger().info("[RTP][落点表] 预计算完成({}ms): {} 个 chunk 已可零 IO 查询{}"
                                  "（dangerBlocks 规则已固化, 改配置需重启）",
-                                 ms2, reader->landingCount());
+                                 ms2, reader->landingCount(),
+                                 reader->landingsCapped()
+                                     ? "（已到上限 randomTeleport.precompute.maxLandings, 其余走内存/生成）"
+                                     : "");
             // 存盘: 下次开服只要世界没改动就直接读它, 不用再算一遍
             try {
                 auto const cache = cacheFilePath();
                 std::ofstream cf(cache + ".meta", std::ios::trunc);
                 cf << ldbFingerprint() << std::endl;
                 cf << dbPath << std::endl;
+                cf << Config::getInstance().landingPrecomputeMax() << std::endl;
                 if (reader->saveLandingsCache(cache)) {
                     scannerLogger().info("[RTP][落点表] 已存盘: {}", cache);
                 }
