@@ -46,18 +46,18 @@ bool WarpManager::teleportToPublicWarp(Player& player, std::string const& name) 
     for (auto& w : DataStore::getInstance().getPublicWarps()) {
         if (w.name == name && w.enabled) {
             int cost = Config::getInstance().getCost("publicWarp");
-            if (cost > 0 && Config::getInstance().economyEnabled()) {
-                if (!Economy::getInstance().canAfford(player, cost)) {
-                    player.sendMessage("§c[传送点] §f余额不足");
-                    return false;
-                }
-                Economy::getInstance().withdraw(player, cost);
-            }
-            if (!teleportPlayerIfReady(player, Vec3((float)w.pos.x, (float)w.pos.y, (float)w.pos.z),
-                                       (::DimensionType)w.pos.dimid)) {
-                player.sendMessage("§c[传送] §f出生点还在加载中，请稍候再试");
+            bool const pay = cost > 0 && Config::getInstance().economyEnabled();
+            if (pay && !Economy::getInstance().canAfford(player, cost)) {
+                player.sendMessage("§c[传送点] §f余额不足");
                 return false;
             }
+            // 先传送, 成功了才扣费: 传不出去（出生/跨维度中）时不该白扣一次
+            if (!teleportPlayerIfReady(player, Vec3((float)w.pos.x, (float)w.pos.y, (float)w.pos.z),
+                                       (::DimensionType)w.pos.dimid)) {
+                player.sendMessage("§c[传送] " + tpBlockedText(player));
+                return false;
+            }
+            if (pay) Economy::getInstance().withdraw(player, cost);
             player.sendMessage("§a[传送点] §f已传送到 §e" + name);
             return true;
         }
@@ -98,18 +98,17 @@ bool WarpManager::teleportToPrivateWarp(Player& player, std::string const& name)
     for (auto& w : warps) {
         if (w.name == name) {
             int cost = Config::getInstance().getCost("privateWarp");
-            if (cost > 0 && Config::getInstance().economyEnabled()) {
-                if (!Economy::getInstance().canAfford(player, cost)) {
-                    player.sendMessage("§c[传送点] §f余额不足");
-                    return false;
-                }
-                Economy::getInstance().withdraw(player, cost);
+            bool const pay = cost > 0 && Config::getInstance().economyEnabled();
+            if (pay && !Economy::getInstance().canAfford(player, cost)) {
+                player.sendMessage("§c[传送点] §f余额不足");
+                return false;
             }
             if (!teleportPlayerIfReady(player, Vec3((float)w.pos.x, (float)w.pos.y, (float)w.pos.z),
                                        (::DimensionType)w.pos.dimid)) {
-                player.sendMessage("§c[传送] §f出生点还在加载中，请稍候再试");
+                player.sendMessage("§c[传送] " + tpBlockedText(player));
                 return false;
             }
+            if (pay) Economy::getInstance().withdraw(player, cost);
             player.sendMessage("§a[私人传送点] §f已传送到 §e" + name);
             return true;
         }
@@ -167,7 +166,7 @@ bool WarpManager::adminTeleportToPlayerWarp(Player& admin, std::string const& ta
         if (w.name == warpName) {
             if (!teleportPlayerIfReady(admin, Vec3((float)w.pos.x, (float)w.pos.y, (float)w.pos.z),
                                        (::DimensionType)w.pos.dimid)) {
-                admin.sendMessage("§c[传送] §f出生点还在加载中，请稍候再试");
+                admin.sendMessage("§c[传送] " + tpBlockedText(admin));
                 return false;
             }
             admin.sendMessage("§a[管理] §f已传送到玩家传送点 §e" + warpName);

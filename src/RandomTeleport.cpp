@@ -485,14 +485,19 @@ void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos
             }
         }
     }
-    s.finished = true;
+    // 真正执行传送放在"结束会话"之前: 玩家此刻正在出生流程 / 跨维度切换里的话不能硬传,
+    // 那就退回等待, 下一拍再试（会话总超时兜底）。硬传的后果是玩家被撕成两个实体（幽灵状态）。
     if (success && pos) {
-        s.keepAreaAfterTeleport = true;   // 区域撤离交给宽限期（见 cleanupSessionArea）
         if (!teleportPlayerIfReady(p, Vec3((float)pos->x, (float)pos->y, (float)pos->z),
                                    (::DimensionType)pos->dimid)) {
-            // 正常不会走到这（会话推进前已等出生完成）; 真发生说明出生流程异常
-            rtpLogger().warn("[RTP] 玩家 {} 出生流程未完成, 本次传送未执行", s.playerName);
+            s.state = Session::LOAD_CHUNK;
+            RTP_DBG("[RTP][落点] {} 此刻不能传送（出生流程/跨维度切换中）, 暂缓后再试", s.playerName);
+            return;   // 不结束会话
         }
+        s.keepAreaAfterTeleport = true;   // 区域撤离交给宽限期（见 cleanupSessionArea）
+    }
+    s.finished = true;
+    if (success && pos) {
         // 下一拍核对客户端的区块发布区域有没有跟到落点（没跟上就是"一片空白"）
         mArrivalChecks.push_back(ArrivalCheck{s.playerName, pos->dimid, pos->x, pos->y, pos->z,
                                               mTickCounter + 1, 0});
@@ -725,11 +730,15 @@ RandomTeleport::StepResult RandomTeleport::stepSession(Session& s) {
     s.titleTick--;
 
     // 出生流程未完成不传送（否则引擎会把玩家放回出生点, 客户端一片灰; 立刻 /tpr 即复现）。
-    // 上限 RTP_SPAWN_WAIT_TICKS: 超时就当出生流程异常放行, 免得死等。
-    if (!isPlayerSpawned(*p) && s.spawnWaitTicks < RTP_SPAWN_WAIT_TICKS) {
+    // 跨维度切换中也不能传（会把玩家撕成两个实体 → 幽灵状态, 能刷物）。
+    // 上限 RTP_SPAWN_WAIT_TICKS: 超时就当异常放行, 免得死等（后面 finishTeleport 还会再挡一次）。
+    bool const spawnPending = !isPlayerSpawned(*p);
+    bool const transferring = isPlayerInDimensionTransfer(*p);
+    if ((spawnPending || transferring) && s.spawnWaitTicks < RTP_SPAWN_WAIT_TICKS) {
         s.spawnWaitTicks++;
         if (s.spawnWaitTicks == 1) {
-            RTP_DBG("[RTP][等待] {} 出生流程未完成, 暂缓传送", s.playerName);
+            RTP_DBG("[RTP][等待] {} {} 暂缓传送", s.playerName,
+                    transferring ? "正在切换维度" : "出生流程未完成");
         }
         return StepResult::Waiting;
     }

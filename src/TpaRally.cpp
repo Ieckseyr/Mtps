@@ -98,29 +98,29 @@ bool TpaRally::acceptRequest(Player& player, std::string const& fromName) {
         return false;
     }
 
-    // 经济扣费
-    int cost = Config::getInstance().getCost("tpa");
-    if (cost > 0 && Config::getInstance().economyEnabled()) {
-        Economy::getInstance().withdraw(*from, cost);
-    }
+    // 经济: 传送成功了才扣（下面两条路都可能因为出生流程/跨维度切换传不出去）
+    int  cost = Config::getInstance().getCost("tpa");
+    bool pay  = cost > 0 && Config::getInstance().economyEnabled()
+                && Economy::getInstance().canAfford(*from, cost);
 
     if (it->type == "tpa") {
         // from 传送到 player
         if (!teleportPlayerIfReady(*from, player.getPosition(), player.getDimensionId())) {
-            from->sendMessage("§c[传送] §f出生点还在加载中，请稍候再试");
-            player.sendMessage("§c[TPA] §f对方出生点还在加载中，请稍候再试");
-            mRequests.erase(it);
+            // 请求保留: 等对方出生/跨维度切换结束还能再同意一次, 不用重新发
+            from->sendMessage("§c[传送] " + tpBlockedText(*from));
+            player.sendMessage("§c[TPA] §f对方暂时传不过来, 请求已保留（稍后再同意即可）");
             return false;
         }
+        if (pay) Economy::getInstance().withdraw(*from, cost);
         from->sendMessage("§a[TPA] §f已传送到 §e" + name);
         player.sendMessage("§a[TPA] §f" + it->fromName + " 已传送到你身边");
     } else {
         // tpahere: player 传送到 from
         if (!teleportPlayerIfReady(player, from->getPosition(), from->getDimensionId())) {
-            player.sendMessage("§c[传送] §f出生点还在加载中，请稍候再试");
-            mRequests.erase(it);
+            player.sendMessage("§c[传送] " + tpBlockedText(player));
             return false;
         }
+        if (pay) Economy::getInstance().withdraw(*from, cost);
         player.sendMessage("§a[TPA] §f已传送到 §e" + it->fromName + " §f身边");
         from->sendMessage("§a[TPA] §f" + name + " 已传送到你身边");
     }
@@ -307,7 +307,7 @@ bool TpaRally::joinRally(Player& player) {
     }
     if (!teleportPlayerIfReady(player, Vec3((float)mRallyX, (float)mRallyY, (float)mRallyZ),
                                (::DimensionType)mRallyDim)) {
-        player.sendMessage("§c[传送] §f出生点还在加载中，请稍候再试");
+        player.sendMessage("§c[传送] " + tpBlockedText(player));
         return false;
     }
     if (charge) Economy::getInstance().withdraw(player, cost);

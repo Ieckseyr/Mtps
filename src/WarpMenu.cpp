@@ -581,7 +581,7 @@ void openNoApprovalWarpsList(Player& player, std::string const& actionStr) {
             auto& warp = warps[num - 1];
             if (!teleportPlayerIfReady(player, Vec3((float)warp.pos.x, (float)warp.pos.y, (float)warp.pos.z),
                                        (::DimensionType)warp.pos.dimid)) {
-                tell(player, "§c[传送] §f出生点还在加载中，请稍候再试");
+                tell(player, "§c[传送] " + tpBlockedText(player));
                 return;
             }
             tell(player, "§a[免申请传送] §f已传送到 §e" + warp.name);
@@ -601,7 +601,7 @@ void openNoApprovalWarpsList(Player& player, std::string const& actionStr) {
             tex::TELEPORT, "path", [&player, warp](Player&) {
                 if (!teleportPlayerIfReady(player, Vec3((float)warp.pos.x, (float)warp.pos.y, (float)warp.pos.z),
                                            (::DimensionType)warp.pos.dimid)) {
-                    tell(player, "§c[传送] §f出生点还在加载中，请稍候再试");
+                    tell(player, "§c[传送] " + tpBlockedText(player));
                     return;
                 }
                 tell(player, "§a[免申请传送] §f已传送到 §e" + warp.name);
@@ -807,7 +807,7 @@ void openPlayerWarpDetail(Player& player, std::string const& xuid) {
             tex::TELEPORT, "path", [&player, warp, admin](Player&) {
                 if (!teleportPlayerIfReady(player, Vec3((float)warp.pos.x, (float)warp.pos.y, (float)warp.pos.z),
                                            (::DimensionType)warp.pos.dimid)) {
-                    tell(player, "§c[传送] §f出生点还在加载中，请稍候再试");
+                    tell(player, "§c[传送] " + tpBlockedText(player));
                     return;
                 }
                 tell(player, std::string(admin ? "§a[管理] §f已传送到 " : "§a[传送] §f已传送到 ") + "§e" + warp.name);

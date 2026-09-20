@@ -10,6 +10,7 @@
 #include "NpcSkin.h"
 #include "RandomTeleport.h"
 #include "TpaRally.h"
+#include "TpUtil.h"
 
 #include <hologramlib/HologramLib.h>
 
@@ -354,6 +355,7 @@ bool Mtps::enable() {
             RandomTeleport::getInstance().tick();
             NpcTeleport::getInstance().tick();   // 虚假实体"逐客户端看向自己"
             TpaRally::getInstance().tick();
+            tpGuardTick();   // 记录各玩家维度变化（跨维度切换中禁止传送, 防幽灵状态刷物）
             DataStore::getInstance().tick();   // 到期把脏数据文件合并落盘（每 3 秒最多一次）
         }
     );

@@ -12,6 +12,7 @@
 #include <ll/api/io/Logger.h>
 #include <ll/api/mod/NativeMod.h>
 
+#include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <ctime>
@@ -578,13 +579,13 @@ void NpcTeleport::teleportPlayerToPoint(Player& player, BlockTpPoint const& poin
         mLastUse[key] = now;
     }
 
-    // 经济
-    if (point.economy.enabled && point.economy.cost > 0 && Config::getInstance().economyEnabled()) {
-        if (!Economy::getInstance().canAfford(player, point.economy.cost)) {
-            player.sendMessage("§c[传送点] §f余额不足");
-            return;
-        }
-        Economy::getInstance().withdraw(player, point.economy.cost);
+    // 经济: 定点路径先查余额、传送成功后才扣（传不出去时不该白扣）;
+    // 随机路径直接把费用交给 RTP —— 它自己扣费、找不到安全位置时退款
+    int const cost = (point.economy.enabled && Config::getInstance().economyEnabled())
+        ? std::max(0, point.economy.cost) : 0;
+    if (cost > 0 && !point.isRandom && !Economy::getInstance().canAfford(player, cost)) {
+        player.sendMessage("§c[传送点] §f余额不足");
+        return;
     }
 
     if (point.isRandom) {
@@ -610,7 +611,7 @@ void NpcTeleport::teleportPlayerToPoint(Player& player, BlockTpPoint const& poin
             opts.originZ    = point.randomOriginZ;
         }
         opts.message = point.message.empty() ? "§a[随机传送] §f已传送！" : point.message;
-        opts.cost = 0; // 已扣费
+        opts.cost = cost;   // 由 RTP 扣费（失败自动退款）
         // 这个点有自己的冷却（见本文件开头）: 关掉随机传送的全局冷却, 免得被卡两次
         opts.cooldownSeconds = -1;
         RandomTeleport::getInstance().start(player, opts);
@@ -618,9 +619,10 @@ void NpcTeleport::teleportPlayerToPoint(Player& player, BlockTpPoint const& poin
         // 固定传送
         if (!teleportPlayerIfReady(player, Vec3((float)point.target.x, (float)point.target.y, (float)point.target.z),
                                    (::DimensionType)point.target.dimid)) {
-            player.sendMessage("§c[传送] §f出生点还在加载中，请稍候再试");
+            player.sendMessage("§c[传送] " + tpBlockedText(player));
             return;
         }
+        if (cost > 0) Economy::getInstance().withdraw(player, cost);
         if (!point.message.empty()) player.sendMessage(point.message);
     }
 }
