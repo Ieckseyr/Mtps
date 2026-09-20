@@ -8,6 +8,7 @@
 #include "Pinyin.h"
 #include "NpcTeleport.h"
 #include "NpcSkin.h"
+#include "HoloLoad.h"
 #include "RandomTeleport.h"
 #include "TpaRally.h"
 #include "TpUtil.h"
@@ -101,6 +102,10 @@ bool Mtps::load() {
 }
 
 bool Mtps::enable() {
+    // HologramLib 是延迟加载的（见 HoloLoad.cpp）: 先把它显式捞进来, 捞不到就明确报错,
+    // 而不是让整个插件在"无法加载 Mtps"里静默消失
+    if (!preloadHologramLib()) return false;
+
     // HologramLib 版本协商: 需要 1.19.1（多播 ghost 交互 + NPC 皮肤 blob API）
     constexpr uint32_t kRequired = 0x011901;
     auto const        ver        = hologramlib::IHologramLib::getInstance().version();
