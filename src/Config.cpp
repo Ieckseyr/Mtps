@@ -197,6 +197,23 @@ void Config::buildCaches() {
             if (it.value().is_string()) mCommandCache[it.key()] = it.value().get<std::string>();
         }
     }
+    // 兜底: 解析完一条可用指令名都没有（老服的配置把整段 commands 抄成了空串, 或者形状不对）
+    // → 回落到出厂指令名并报错。否则插件会"一条指令都不注册"而且一声不吭, 只有经验才知道去看配置。
+    {
+        bool any = false;
+        for (auto& kv : mCommandCache) {
+            if (!kv.second.empty()) { any = true; break; }
+        }
+        if (!any) {
+            auto const defs = defaultConfig()["commands"];
+            for (auto it = defs.begin(); it != defs.end(); ++it) {
+                if (it.value().is_string()) mCommandCache[it.key()] = it.value().get<std::string>();
+            }
+            ll::mod::NativeMod::current()->getLogger().error(
+                "[配置] commands 段里一条有效指令名都没有（全是空串?）→ 已回落到出厂指令名; "
+                "请检查 Meowdata/Mtps/Config.json 的 commands 段");
+        }
+    }
 
     // NPC 皮肤的额外来源目录（默认指向 MHR 的皮肤目录, 让 MHR 存过的皮肤这里直接可用）
     mSkinExtraDirs.clear();

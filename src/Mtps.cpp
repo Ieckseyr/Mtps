@@ -258,8 +258,16 @@ int Mtps::registerCommands() {
         // 同名指令已经存在 → 跳过。典型情况: 老服的 JS 版 Mtps 还在跑, 它的 /mtps /warp 等
         // 已经注册过了; 这时再往原版注册表里塞同名的会把访问冲突直接带出来（之前整个
         // "注册指令"步骤就是崩在这）。跳过 + 明确提示, 让用户决定停用哪一边。
-        if (auto registry = ll::service::getCommandRegistry(false);
-            registry && registry->findCommand(n) != nullptr) {
+        // 查重本身也兜住: 万一这步在某个版本上不可用, 不能连带把后面十几条指令全废了
+        bool exists = false;
+        try {
+            if (auto registry = ll::service::getCommandRegistry(false); registry) {
+                exists = (registry->findCommand(n) != nullptr);
+            }
+        } catch (...) {
+            getSelf().getLogger().warn("[指令] 查询 /{} 是否已被注册时出错, 按未占用继续", n);
+        }
+        if (exists) {
             getSelf().getLogger().warn(
                 "指令 /{} 已被占用（JS 版 Mtps 或其它插件注册过）, 本次跳过 commands.{};"
                 " 想用 C++ 版的指令请先停用 JS 版", n, key);
@@ -267,7 +275,13 @@ int Mtps::registerCommands() {
         }
 
         getSelf().getLogger().info("[指令] 注册 /{} (commands.{}) ...", n, key);
-        CommandHandle* h = &reg.getOrCreateCommand(n, desc, perm);
+        CommandHandle* h = nullptr;
+        try {
+            h = &reg.getOrCreateCommand(n, desc, perm);
+        } catch (...) {
+            getSelf().getLogger().error("[指令] /{} 注册时出错（多半是同名指令冲突）, 已跳过这条", n);
+            return nullptr;
+        }
         getSelf().getLogger().info("[指令] /{} 句柄就绪, 装配参数", n);
         return h;
     };
