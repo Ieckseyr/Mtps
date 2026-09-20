@@ -1,4 +1,4 @@
-add_rules("mode.debug", "mode.release")
+﻿add_rules("mode.debug", "mode.release")
 
 local function find_local_repo()
     local candidates = {
@@ -51,11 +51,9 @@ target("Mtps")
 
     add_includedirs("../HologramLib/include")
     add_linkdirs("../HologramLib/build/windows/x64/release")
-    -- HologramLib 改成延迟加载（见 src/HoloLoad.cpp）: 静态导入的话, 只要 HologramLib.dll 还没
-    -- 就绪, Windows 就会拒绝加载 Mtps.dll —— 只留一行"无法加载 Mtps", 看不出跟对方有关。
-    add_links("HologramLib", "delayimp")
-    -- 这个构建脚本的链接标志走 shflags（linkrule 里给 bedrock_runtime.dll 也是这么加的）
-    add_shflags("/DELAYLOAD:HologramLib.dll", {force = true})
+    -- 暂时退回普通导入做对照: /DELAYLOAD + delayimp 那一版在本机上会把
+    -- LL 指令接口搞成"内部访问冲突"（见 HoloLoad.cpp 的说明）, 先验一遍是不是它
+    add_links("HologramLib")
 
     add_headerfiles("src/**.h")
     add_files("src/**.cpp")

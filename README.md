@@ -69,6 +69,7 @@ Minecraft 基岩版（LeviLamina 26.40）的传送系统插件，C++ 实现。
 
 ```json
 {
+  "debug": false,
   "commands": { "menu": "mtps", "private": "pw", "reload": "rld" },
   "skins": {
     "extraDirs": ["plugins/MeowHolographicRenderer/config/npc_skins"]
@@ -105,6 +106,8 @@ Minecraft 基岩版（LeviLamina 26.40）的传送系统插件，C++ 实现。
 
 上面是节选，实际文件里各段都是完整的。几处要点：
 
+- `debug`：顶层调试日志开关（默认 `false`）。打开后会输出启用步骤、指令注册逐条结果、
+  随机传送的详细流程（选点/扩圈/等待/落点来源）等；平时保持关掉即可。
 - `commands`：指令名，规则见上一节。
 - `skins.extraDirs`：额外的皮肤来源目录（默认指向 MHR 的皮肤目录，认其中的 `*.bin` 快照）。
 - `blockTeleport.editTool`：管理员编辑工具，`item` 填物品名（留空 = 只认蹲下）。
@@ -113,6 +116,8 @@ Minecraft 基岩版（LeviLamina 26.40）的传送系统插件，C++ 实现。
   `<= 0` 关闭防抖。
 - `randomTeleport.cooldownSeconds`：全局随机传送冷却；预设自己的 `cooldown` 优先，
   `0` = 用全局、`>0` = 用该值。
+- `randomTeleport.debug`：随机传送的详细流程日志，**默认 `false`**（顶层 `debug` 是总开关，
+  两者任一开着都会输出）。
 - `randomTeleport.precompute`：落点表预计算的开关与上限。
   `enabled: false` = 完全不碰存档（不建索引、不扫 `.ldb`、不读缓存），随机传送只走内存 + 区块生成；
   `maxLandings` = 预计算落点上限（chunk 数，`0` = 不限制，每个约 16 字节内存）。

@@ -187,16 +187,16 @@ bool Mtps::enableInner() {
 
     // 启用各步骤都留一行日志: 这一路要调引擎和 HologramLib, 万一某步把访问冲突带出来,
     // 有步骤日志才能一眼看出是哪一步（踩过一次: 只看到"载体已创建"然后进程就没了）
-    getSelf().getLogger().info("[启用] 1/6 HologramLib 版本=0x{:06X}, 开始扫皮肤目录", ver);
+    if (Config::getInstance().debug()) getSelf().getLogger().info("[启用] 1/6 HologramLib 版本=0x{:06X}, 开始扫皮肤目录", ver);
 
     // 皮肤: 先把 npc_skins 目录（以及 Config.skins.extraDirs, 默认含 MHR 的皮肤目录）
     // 扫一遍注册好 —— 后面创建 NPC 要按 skinId 去注册表里取, 取不到就创建不出来
     skins::refresh();
-    getSelf().getLogger().info("[启用] 2/6 皮肤就绪, 开始创建 NPC/实体载体");
+    if (Config::getInstance().debug()) getSelf().getLogger().info("[启用] 2/6 皮肤就绪, 开始创建 NPC/实体载体");
 
     // 创建 NPC 传送点（HologramLib IPlayerNpc + 常显悬浮字 + 皮肤 blob 恢复）
     NpcTeleport::getInstance().init();
-    getSelf().getLogger().info("[启用] 3/6 载体就绪, 注册 ghost 交互监听");
+    if (Config::getInstance().debug()) getSelf().getLogger().info("[启用] 3/6 载体就绪, 注册 ghost 交互监听");
 
     // Ghost 交互多播监听（NPC 域: 右键 NPC 触发传送）
     mGhostToken = holo().addGhostInteractListener(
@@ -211,7 +211,7 @@ bool Mtps::enableInner() {
     if (mGhostToken == 0) {
         getSelf().getLogger().warn("Ghost 交互多播监听注册失败, NPC 传送交互不可用");
     }
-    getSelf().getLogger().info("[启用] 4/6 交互监听就绪, 注册指令");
+    if (Config::getInstance().debug()) getSelf().getLogger().info("[启用] 4/6 交互监听就绪, 注册指令");
 
     // 指令注册单独兜一层: 命令注册表没就绪 / 版本不匹配都会在这里出访问冲突,
     // 不该让整个插件跟着停用 —— 记下条数, 等服务器 tick 起来后再重试几次
@@ -254,7 +254,7 @@ bool Mtps::enableInner() {
         getSelf().getLogger().error("tick 监听器注册失败! 随机传送/TPA 超时清理将无法工作");
     }
 
-    getSelf().getLogger().info("[启用] 5/6 指令与 tick 监听就绪, 注册 PAPI 与存档索引");
+    if (Config::getInstance().debug()) getSelf().getLogger().info("[启用] 5/6 指令与 tick 监听就绪, 注册 PAPI 与存档索引");
 
     // RTP 存档直读: 后台线程建 .ldb 索引（大存档十几秒, 不卡启用; 就绪前 RTP 回退生成路径）
     ArchiveScanner::getInstance().startAsync();
@@ -263,7 +263,7 @@ bool Mtps::enableInner() {
     papi::registerAll();
     getSelf().getLogger().info("PAPI: {}", papi::statusText());
 
-    getSelf().getLogger().info("[启用] 6/6 PAPI 就绪: {}", papi::statusText());
+    if (Config::getInstance().debug()) getSelf().getLogger().info("[启用] 6/6 PAPI 就绪: {}", papi::statusText());
     getSelf().getLogger().info("Mtps C++ 版已启用（随机传送四级数据源: 内存/落点表/存档直读/区块视野生成）");
     mEnabled = true;
     return true;
@@ -274,9 +274,9 @@ bool Mtps::enableInner() {
 // 不该让整个插件停用 —— 失败就把条数留成 0, 由 tick 侧重试几次。
 int Mtps::registerCommands() {
     using Perm = CommandPermissionLevel;
-    getSelf().getLogger().info("[启用] 4.1/6 取 CommandRegistrar");
+    if (Config::getInstance().debug()) getSelf().getLogger().info("[启用] 4.1/6 取 CommandRegistrar");
     auto& reg = CommandRegistrar::getInstance(false);
-    getSelf().getLogger().info("[启用] 4.2/6 CommandRegistrar 就绪, 开始逐条注册指令");
+    if (Config::getInstance().debug()) getSelf().getLogger().info("[启用] 4.2/6 CommandRegistrar 就绪, 开始逐条注册指令");
     auto& cfg = Config::getInstance();
 
     // 打清楚"到底读的哪份配置、从哪个工作目录读的": 面板/启动器改过工作目录时, 读到的
@@ -366,7 +366,7 @@ int Mtps::registerCommands() {
             getSelf().getLogger().error("[指令] /{} 注册时出错（多半是同名指令冲突）, 已跳过这条", n);
             return nullptr;
         }
-        getSelf().getLogger().info("[指令] /{} 句柄就绪, 装配参数", n);
+        if (cfg.debug()) getSelf().getLogger().info("[指令] /{} 句柄就绪, 装配参数", n);
         return h;
     };
     int registered = 0;
@@ -379,7 +379,7 @@ int Mtps::registerCommands() {
         // 注意别为了探测而多调一次 overload: 那会给同一条指令挂两份参数集。
         // 这一整段（建参数集 → 挂到指令 → 注册执行体）就是云上崩掉的地方:
         // 前后各打一行, 崩了就说明是这段（Overload 是右值, 拆开写会多挂一份参数集, 不能拆）
-        getSelf().getLogger().info("[指令] /mtps 开始装配参数");
+        if (Config::getInstance().debug()) getSelf().getLogger().info("[指令] /mtps 开始装配参数");
         cmd->overload<ActionP>().optional("action").execute(
             [](CommandOrigin const& origin, CommandOutput& output, ActionP const& p) {
                 // 子参数: 重载。JS 版的重载就挂在 /mtps 下面（不是独立指令）, 名字仍可在
@@ -409,7 +409,7 @@ int Mtps::registerCommands() {
                 menu::openMainMenu(*player);
             });
     }
-        getSelf().getLogger().info("[指令] /mtps 装配参数完成");
+        if (Config::getInstance().debug()) getSelf().getLogger().info("[指令] /mtps 装配参数完成");
 
     // 传送点系统
     if (auto* cmd = mkcmd("warp", "传送点系统", Perm::Any)) {

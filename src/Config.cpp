@@ -39,6 +39,7 @@ fs::path Config::npcSkinsDir()         { return dataDir() / "npc_skins"; }
 
 json Config::defaultConfig() {
     return R"({
+        "debug": false,
         "economy": { "enabled": false, "type": "llmoney", "scoreboardName": "money", "moneyName": "金币",
             "costs": { "publicWarp": 0, "privateWarp": 50, "noApprovalWarp": 50, "tpa": 100, "rally": 0, "randomTeleport": 0 } },
         "teleport": { "cooldownTime": 30, "effectiveDuration": 60, "maxPrivateWarps": 5 },
@@ -75,7 +76,7 @@ json Config::defaultConfig() {
         },
         "randomTeleport": {
             "enabled": true, "cooldownSeconds": 120, "maxAttempts": 50,
-            "debug": true, "preferKnownLandings": false,
+            "debug": false, "preferKnownLandings": false,
             "precompute": { "enabled": true, "maxLandings": 0 },
             "dangerBlocks": [ "minecraft:lava","minecraft:flowing_lava","minecraft:water","minecraft:flowing_water",
                 "minecraft:fire","minecraft:soul_fire","minecraft:cactus","minecraft:sweet_berry_bush",
@@ -271,6 +272,8 @@ void Config::buildCaches() {
     auto const& rules = subOf(mConfig, "defaultRules");
     auto const& log   = subOf(mConfig, "logging");
 
+    mDebug              = jbool(mConfig, "debug", false);
+
     mEconomyEnabled     = jbool(econ, "enabled", false);
     mEconomyType        = jstr(econ, "type", "llmoney");
     mScoreboardName     = jstr(econ, "scoreboardName", "money");
@@ -294,7 +297,7 @@ void Config::buildCaches() {
     mRandomEnabled      = jbool(rtp, "enabled", true);
     mRandomCooldown     = jint(rtp, "cooldownSeconds", 120);
     mRandomMaxAttempts  = jint(rtp, "maxAttempts", 50);
-    mRandomDebug        = jbool(rtp, "debug", true);
+    mRandomDebug        = jbool(rtp, "debug", false);
     mRandomPreferKnown  = jbool(rtp, "preferKnownLandings", false);
 
     // 落点表预计算: 是否启用 + 预计算落点上限（chunk 数, 0 = 不限制）
@@ -407,6 +410,11 @@ bool Config::migrateLegacy() {
     if (btp != mConfig.end() && btp->is_object() && !btp->contains("editTool")) {
         (*btp)["editTool"] = defaultConfig()["blockTeleport"]["editTool"];
         changed            = true;
+    }
+    // 顶层的调试日志开关
+    if (!mConfig.contains("debug")) {
+        mConfig["debug"] = defaultConfig()["debug"];
+        changed          = true;
     }
     // 随机传送的选点策略同理
     auto rtp = mConfig.find("randomTeleport");

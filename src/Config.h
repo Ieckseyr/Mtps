@@ -78,6 +78,9 @@ public:
     std::string const& sidebarFormat() const { return mSidebarFormat; }
     std::string        getNotifyText(std::string const& key) const;
 
+    // 顶层的调试日志开关（默认关）: 启用步骤/指令注册诊断/随机传送详细流程都挂在它下面
+    bool        debug() const { return mDebug; }
+
     // 随机传送
     bool        randomTeleportEnabled() const { return mRandomEnabled; }
     int         randomCooldownSeconds() const { return mRandomCooldown; }
@@ -181,6 +184,7 @@ private:
     float mSoundVolume{1.0f};
     bool mSidebarEnabled{true};
     std::string mSidebarFormat{"§6[TPA] §e{player} §7{type}"};
+    bool mDebug{false};
     bool mRandomEnabled{true};
     int  mRandomCooldown{120};
     int  mRandomMaxAttempts{50};
