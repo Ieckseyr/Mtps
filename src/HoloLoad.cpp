@@ -5,6 +5,8 @@
 
 #include <windows.h>
 
+#include <hologramlib/HologramLib.h>
+
 #include <filesystem>
 
 namespace mtps {
@@ -28,9 +30,19 @@ std::filesystem::path selfDir() {
 
 } // namespace
 
+namespace {
+hologramlib::IHologramLib* sHolo = nullptr;
+}
+
+hologramlib::IHologramLib* holoInstance() { return sHolo; }
+
 bool preloadHologramLib() {
+    if (sHolo != nullptr) return true;
     // ① 已经在进程里的（LeviLamina 按 mod 依赖先加载它的情况）
-    if (::GetModuleHandleA(kHoloDll) != nullptr) return true;
+    if (::GetModuleHandleA(kHoloDll) != nullptr) {
+        sHolo = &hologramlib::IHologramLib::getInstance();   // 唯一一次过延迟加载桩
+        return true;
+    }
 
     // ② 插件目录: <Mtps.dll 所在目录>/../HologramLib/HologramLib.dll
     std::filesystem::path const dir = selfDir();
@@ -38,15 +50,20 @@ bool preloadHologramLib() {
         auto const p = dir / ".." / "HologramLib" / kHoloDll;
         if (::GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES
             && ::LoadLibraryW(p.c_str()) != nullptr) {
+            sHolo = &hologramlib::IHologramLib::getInstance();
             return true;
         }
     }
     // ③ 工作目录下的标准位置（服务器根/plugins/HologramLib/）
-    if (::LoadLibraryA("plugins/HologramLib/HologramLib.dll") != nullptr) return true;
+    if (::LoadLibraryA("plugins/HologramLib/HologramLib.dll") != nullptr) {
+        sHolo = &hologramlib::IHologramLib::getInstance();
+        return true;
+    }
 
     ll::mod::NativeMod::current()->getLogger().error(
         "[HologramLib] 没有找到 HologramLib.dll（找过: 已加载模块 / <插件目录>/../HologramLib/ / "
-        "plugins/HologramLib/）; 请确认它已放进 plugins/HologramLib/ 并且自己加载成功");
+        "plugins/HologramLib/）; 请确认它已放进 plugins/HologramLib/ 并且自己加载成功; "
+        "本次 Mtps 停用（不会在 tick 里再抛延迟加载异常）");
     return false;
 }
 

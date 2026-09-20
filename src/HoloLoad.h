@@ -10,9 +10,24 @@
 // 注意: 延迟加载的 stub 是按名字找已加载模块的, 所以这里必须先 LoadLibrary 成功 ——
 // 捞不到就明确报错并让 enable() 失败, 而不是整个插件在"无法加载 Mtps"里静默消失。
 
+namespace hologramlib {
+class IHologramLib;
+}
+
 namespace mtps {
 
-// 显式把 HologramLib.dll 载进来（enable 开头调用; 失败会打日志并返回 false）
+// 显式把 HologramLib.dll 载进来并在成功后缓存 IHologramLib 实例
+// （enable 开头调用; 失败会打日志并返回 false）
 bool preloadHologramLib();
+
+// 缓存的 HologramLib 实例; 没解析成功返回 nullptr。
+// 之所以要缓存: IHologramLib::getInstance() 是 Mtps.dll 里唯一一条"延迟加载"导入,
+// 每调用一次都要过一遍延迟加载桩 —— 那个桩在解析失败时是抛 SEH 异常（0xC06D007E）而不是
+// 返回空, 放在 tick 热路径上就等于给服务器埋雷（已经炸过: 服务器 tick 里抛, 整进程退出）。
+hologramlib::IHologramLib* holoInstance();
+
+// 便捷取用（仅在确认已就绪的路径上用, 比如 enable 成功之后的 tick/交互）
+inline hologramlib::IHologramLib& holo() { return *holoInstance(); }
+inline bool holoReady() { return holoInstance() != nullptr; }
 
 } // namespace mtps

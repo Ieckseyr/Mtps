@@ -146,7 +146,7 @@ bool Mtps::enableInner() {
 
     // HologramLib 版本协商: 需要 1.19.1（多播 ghost 交互 + NPC 皮肤 blob API）
     constexpr uint32_t kRequired = 0x011901;
-    auto const        ver        = hologramlib::IHologramLib::getInstance().version();
+    auto const        ver        = holo().version();
     if (ver < kRequired) {
         getSelf().getLogger().error("HologramLib 版本过低: 当前 0x{:06X}, 需要 >= 0x011901 (1.19.1)", ver);
         getSelf().getLogger().error("请将新版 HologramLib.dll 部署到 plugins/HologramLib/ 后重启服务器");
@@ -167,7 +167,7 @@ bool Mtps::enableInner() {
     getSelf().getLogger().info("[启用] 3/6 载体就绪, 注册 ghost 交互监听");
 
     // Ghost 交互多播监听（NPC 域: 右键 NPC 触发传送）
-    mGhostToken = hologramlib::IHologramLib::getInstance().addGhostInteractListener(
+    mGhostToken = holo().addGhostInteractListener(
         [](hologramlib::GhostInteractEvent const& ev) {
             // 1=右键交互 2=左键攻击 4=交互更新（某些客户端蹲下右键发的是 4）;
             // 是否触发由点位开关与编辑工具决定, 都在 NpcTeleport 内判断
@@ -202,12 +202,20 @@ bool Mtps::enableInner() {
                 getSelf().getLogger().info("tick 事件已触发（事件 ID 对齐补丁生效）");
             }
             mTicks++;
-            RandomTeleport::getInstance().tick();
-            NpcTeleport::getInstance().tick();   // 虚假实体"逐客户端看向自己"
-            TpaRally::getInstance().tick();
-            tpGuardTick();   // 记录各玩家维度变化（跨维度切换中禁止传送, 防幽灵状态刷物）
-            if (mCommandRetryLeft > 0) retryRegisterCommands();   // 启用时没注册上指令 → 每秒补一次
-            DataStore::getInstance().tick();   // 到期把脏数据文件合并落盘（每 3 秒最多一次）
+            // 兜一层异常（工程是 /EHa, 连 SEH 一起兜）: tick 是每个 tick 都跑的热路径,
+            // 这里漏出去一个异常就是整个服务器进程退出（踩过一次: 延迟加载解析失败抛 0xC06D007E）
+            try {
+                RandomTeleport::getInstance().tick();
+                NpcTeleport::getInstance().tick();   // 虚假实体"逐客户端看向自己"
+                TpaRally::getInstance().tick();
+                tpGuardTick();   // 记录各玩家维度变化（跨维度切换中禁止传送, 防幽灵状态刷物）
+                if (mCommandRetryLeft > 0) retryRegisterCommands();   // 启用时没注册上指令 → 每秒补一次
+                DataStore::getInstance().tick();   // 到期把脏数据文件合并落盘（每 3 秒最多一次）
+            } catch (std::exception const& e) {
+                if (mTicks % 100 == 1) getSelf().getLogger().error("[tick] 抛出异常, 本 tick 跳过: {}", e.what());
+            } catch (...) {
+                if (mTicks % 100 == 1) getSelf().getLogger().error("[tick] 抛出未知异常（含访问冲突）, 本 tick 跳过");
+            }
         }
     );
     if (!mTickListener) {
@@ -509,9 +517,9 @@ void Mtps::retryRegisterCommands() {
 }
 
 bool Mtps::disable() {
-    // 移除 ghost 多播监听
-    if (mGhostToken != 0) {
-        hologramlib::IHologramLib::getInstance().removeGhostInteractListener(mGhostToken);
+    // 移除 ghost 多播监听（HologramLib 没就绪就跳过, 别在停用路径上再碰延迟加载桩）
+    if (mGhostToken != 0 && holoReady()) {
+        holo().removeGhostInteractListener(mGhostToken);
         mGhostToken = 0;
     }
     if (mTickListener) {

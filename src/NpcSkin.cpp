@@ -1,4 +1,5 @@
-#include "NpcSkin.h"
+﻿#include "NpcSkin.h"
+#include "HoloLoad.h"
 #include "NpcSkinSteve.h"
 #include "Config.h"
 
@@ -21,7 +22,7 @@ namespace {
 
 ll::io::Logger& log() { return ll::mod::NativeMod::current()->getLogger(); }
 
-hologramlib::IPlayerNpc& npcs() { return hologramlib::IHologramLib::getInstance().playerNpcs(); }
+hologramlib::IPlayerNpc& npcs() { return holo().playerNpcs(); }
 
 // 默认皮肤文件不存在就生成一份（存在则完全不动它, 用户放的皮肤说了算）
 void ensureDefaultFile() {

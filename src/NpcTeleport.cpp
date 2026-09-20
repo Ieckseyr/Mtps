@@ -1,4 +1,5 @@
 ﻿#include "NpcTeleport.h"
+#include "HoloLoad.h"
 #include "DataStore.h"
 #include "Config.h"
 #include "Menu.h"
@@ -68,8 +69,8 @@ NpcTeleport& NpcTeleport::getInstance() {
 struct CarrierApi {
     bool isEntity{false};
 
-    hologramlib::IPlayerNpc&    npcs() const { return hologramlib::IHologramLib::getInstance().playerNpcs(); }
-    hologramlib::ICustomEntity& ents() const { return hologramlib::IHologramLib::getInstance().customEntities(); }
+    hologramlib::IPlayerNpc&    npcs() const { return holo().playerNpcs(); }
+    hologramlib::ICustomEntity& ents() const { return holo().customEntities(); }
 
     bool exists(int64_t id) const { return isEntity ? ents().exists(id) : npcs().exists(id); }
     std::vector<int64_t> allIds() const { return isEntity ? ents().getAllIds() : npcs().getAllIds(); }
@@ -196,7 +197,7 @@ void NpcTeleport::createNpcCarrier(BlockTpPoint const& point, NpcRuntime& rt) {
 
 // 虚假实体载体: AddActorPacket 直发客户端, 不占服务端实体系统; 实体类型可填
 void NpcTeleport::createEntityCarrier(BlockTpPoint const& point, NpcRuntime& rt) {
-    auto& entMgr = hologramlib::IHologramLib::getInstance().customEntities();
+    auto& entMgr = holo().customEntities();
 
     CarrierPos const cp = carrierPosOf(point);
     hologramlib::CustomEntityConfig cfg;
@@ -251,7 +252,7 @@ void NpcTeleport::createEntityCarrier(BlockTpPoint const& point, NpcRuntime& rt)
 // 文本里的换行拆成多行下发（表单约定用 "\n" 字面量输入, 存进数据时已解码成真换行）
 void NpcTeleport::createHologramForPoint(BlockTpPoint const& point, NpcRuntime& rt) {
     if (!point.floatingTextEnabled || point.floatingText.empty()) return;
-    auto&            textMgr = hologramlib::IHologramLib::getInstance().holograms();
+    auto&            textMgr = holo().holograms();
     CarrierPos const cp      = carrierPosOf(point);
     int64_t          holoId  = textMgr.create(cp.x, cp.y + point.floatingOffsetY, cp.z);
     if (holoId <= 0) return;
@@ -272,7 +273,7 @@ void NpcTeleport::createHologramForPoint(BlockTpPoint const& point, NpcRuntime& 
 void NpcTeleport::destroyHologramOf(std::string const& pointName) {
     auto it = mNpcs.find(pointName);
     if (it == mNpcs.end() || it->second.holoId <= 0) return;
-    hologramlib::IHologramLib::getInstance().holograms().destroy(it->second.holoId);
+    holo().holograms().destroy(it->second.holoId);
     it->second.holoId = -1;
 }
 
@@ -290,16 +291,18 @@ void NpcTeleport::destroyCarrier(std::string const& pointName) {
         mIdToPoint.erase(rt.carrierId);
     }
     if (rt.holoId > 0) {
-        hologramlib::IHologramLib::getInstance().holograms().destroy(rt.holoId);
+        holo().holograms().destroy(rt.holoId);
     }
     mNpcs.erase(it);
 }
 
 void NpcTeleport::destroyAllNpcs() {
-    auto& holo = hologramlib::IHologramLib::getInstance();
+    // HologramLib 没就绪时（enable 未成功）这里什么都别做: 那些 id 本来就是空的,
+    // 硬调反而会踩到延迟加载桩（解析失败时它抛异常, 不是返回空）
+    if (!holoReady()) { mNpcs.clear(); mIdToPoint.clear(); return; }
     for (auto& [name, rt] : mNpcs) {
         if (rt.carrierId > 0 && !(rt.isEntity && rt.mhrOwned)) carrierApi(rt.isEntity).destroy(rt.carrierId);
-        if (rt.holoId > 0) holo.holograms().destroy(rt.holoId);
+        if (rt.holoId > 0) holo().holograms().destroy(rt.holoId);
     }
     mNpcs.clear();
     mIdToPoint.clear();
@@ -410,6 +413,8 @@ void NpcTeleport::tick() {
     static uint32_t sLookTick = 0;
     if ((++sLookTick % 2) != 0) return;          // 10Hz 节流（与 MHR 同）
     if (mNpcs.empty()) return;
+    // HologramLib 没就绪（enable 没成功）就不进这个世界操作路径: 下面每一步都要调它的接口
+    if (!holoReady()) return;
 
     auto level = ll::service::getLevel();
     if (!level) return;
