@@ -18,6 +18,7 @@
 #include "MtpsPapi.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <cctype>
 #include <ll/api/command/CommandHandle.h>
 #include <ll/api/command/CommandRegistrar.h>
@@ -246,6 +247,19 @@ int Mtps::registerCommands() {
     auto& reg = CommandRegistrar::getInstance(false);
     getSelf().getLogger().info("[启用] 4.2/6 CommandRegistrar 就绪, 开始逐条注册指令");
     auto& cfg = Config::getInstance();
+
+    // 打清楚"到底读的哪份配置、从哪个工作目录读的": 面板/启动器改过工作目录时, 读到的
+    // 就不是你在编辑的那份 Config.json, 症状正是"指令名全是空 / 改了没反应"
+    {
+        std::error_code ec;
+        getSelf().getLogger().info("[指令] 工作目录={}, 配置={}（存在={}）",
+                                   std::filesystem::current_path(ec).string(),
+                                   Config::configPath().string(),
+                                   std::filesystem::exists(Config::configPath()) ? "是" : "否");
+        for (char const* k : {"menu", "warp", "private", "reload"}) {
+            getSelf().getLogger().info("[指令] commands.{} = [{}]", k, cfg.getCommand(k));
+        }
+    }
 
     // 指令名会直接进命令解析器, 所以这里自己先校验一遍字符集; 不合法就跳过并告警
     auto cmdName = [this, &cfg](char const* key) -> std::string {
