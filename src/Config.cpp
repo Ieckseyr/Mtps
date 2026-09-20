@@ -205,13 +205,23 @@ void Config::buildCaches() {
             if (!kv.second.empty()) { any = true; break; }
         }
         if (!any) {
-            auto const defs = defaultConfig()["commands"];
-            for (auto it = defs.begin(); it != defs.end(); ++it) {
-                if (it.value().is_string()) mCommandCache[it.key()] = it.value().get<std::string>();
+            bool const hasSection = mConfig.contains("commands") && mConfig["commands"].is_object();
+            if (!hasSection) {
+                // 段都没有/形状不对: 没法"尊重"一份不存在的配置, 用出厂名, 并说明
+                auto const defs = defaultConfig()["commands"];
+                for (auto it = defs.begin(); it != defs.end(); ++it) {
+                    if (it.value().is_string()) mCommandCache[it.key()] = it.value().get<std::string>();
+                }
+                ll::mod::NativeMod::current()->getLogger().error(
+                    "[配置] Config.json 里没有可用的 commands 段 → 本次用出厂指令名; "
+                    "要让配置文件里出现这一段, 下次启动会自动补上");
+            } else {
+                // 段在、名字全是空串: 这是配置主人的明确选择（留空 = 不注册）, 就按它执行,
+                // 只提示一下 —— 插件不改写、也不替用户决定注册什么
+                ll::mod::NativeMod::current()->getLogger().error(
+                    "[配置] commands 段里一条有效指令名都没有（都是空串）→ 本次不注册任何指令; "
+                    "想启用就把名字填上, 出厂默认名见 README 的命令表");
             }
-            ll::mod::NativeMod::current()->getLogger().error(
-                "[配置] commands 段里一条有效指令名都没有（全是空串?）→ 已回落到出厂指令名; "
-                "请检查 Meowdata/Mtps/Config.json 的 commands 段");
         }
     }
 
@@ -363,46 +373,21 @@ bool Config::load() {
 
 // 旧版默认指令名 → 现在的新默认名（指令名统一改短, rallyjoin 并进了 accept）
 namespace {
-// 默认指令名改回 JS 版那套（mywarp/pubwarp/...）后, 之前跟着"缩短版"改过名的配置会留成
-// pw/pub/nap/... —— 这里把它们推回新版默认名（只动仍然是旧默认值的项, 用户自己取的名字不动）
-constexpr std::pair<char const*, char const*> kLegacyCommandNames[] = {
-    {"private",     "pw"},
-    {"public",      "pub"},
-    {"noapproval",  "nap"},
-    {"browser",     "list"},
-    {"rally",       "call"},
-    {"settings",    "set"},
-    {"blacklist",   "blk"},
-    {"admin",       "adm"},
-    {"blocktp",     "btp"},
-    {"crossserver", "cs"},
-    {"reload",      "rld"},   // 重载从独立指令改成 /mtps 的子参数, 名字也回到 JS 版的 reload
-};
 } // namespace
 
 bool Config::migrateLegacy() {
     bool changed = false;
     // 物理传送点模式已下线
     if (mConfig.erase("physicalWarpOnlyMode") > 0) changed = true;
-    // 指令名: 只改"还是旧默认值"的项, 用户自己取的名字一概不动
+    // 指令名: 配置怎么写就怎么注册 —— 插件不改写用户写下的名字, 也不删键。
+    // 只把"配置里还没有的键"按默认值补进去, 否则新功能的指令名在 Config.json 里看不见、也就改不成。
     auto cmds = mConfig.find("commands");
     if (cmds != mConfig.end() && cmds->is_object()) {
         auto const defs = defaultConfig()["commands"];
-        if (cmds->erase("rallyjoin") > 0) changed = true;
-        for (auto const& [key, oldName] : kLegacyCommandNames) {
-            auto it = cmds->find(key);
-            if (it == cmds->end() || !it->is_string()) continue;
-            if (it->get<std::string>() != oldName) continue;
-            auto def = defs.find(key);
-            if (def == defs.end()) continue;
-            *it = *def;
-            changed = true;
-        }
-        // 新增的指令键补进去, 否则它们在 Config.json 里看不见也就改不成
         for (auto it = defs.begin(); it != defs.end(); ++it) {
             if (!cmds->contains(it.key())) {
                 (*cmds)[it.key()] = it.value();
-                changed        = true;
+                changed           = true;
             }
         }
     }
