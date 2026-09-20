@@ -238,7 +238,9 @@ int Mtps::registerCommands() {
             getSelf().getLogger().warn("commands.{} 的指令名 \"{}\" 不合法（只能用字母/数字/下划线）, 已跳过", key, n);
             return {};
         }
-        if (n.size() > 4) {
+        // 长度提醒只针对"用户自己起的名字": JS 版那套默认名（mywarp/pubwarp/tpadmin…）
+        // 本来就超过 4 个字母, 每次开服刷 9 行告警没有意义
+        if (n.size() > 4 && n != Config::defaultConfig()["commands"].value(key, std::string{})) {
             getSelf().getLogger().warn("指令 /{} (commands.{}) 超过 4 个字母, 建议改短", n, key);
         }
         return n;

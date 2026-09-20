@@ -37,7 +37,7 @@ fs::path Config::blockTpPointsPath()   { return dataDir() / "BlockTeleportPoints
 fs::path Config::crossServerPath()     { return dataDir() / "CrossServer.json"; }
 fs::path Config::npcSkinsDir()         { return dataDir() / "npc_skins"; }
 
-json Config::defaultConfig() const {
+json Config::defaultConfig() {
     return R"({
         "economy": { "enabled": false, "type": "llmoney", "scoreboardName": "money", "moneyName": "金币",
             "costs": { "publicWarp": 0, "privateWarp": 50, "noApprovalWarp": 50, "tpa": 100, "rally": 0, "randomTeleport": 0 } },
@@ -86,10 +86,10 @@ json Config::defaultConfig() const {
             ]
         },
         "commands": {
-            "enabled": true, "menu": "mtps", "warp": "warp", "private": "pw", "tpa": "tpa",
-            "rally": "call", "requests": "req", "settings": "set",
-            "blacklist": "blk", "admin": "adm", "blocktp": "btp", "random": "tpr",
-            "public": "pub", "noapproval": "nap", "browser": "list", "crossserver": "cs",
+            "enabled": true, "menu": "mtps", "warp": "warp", "private": "mywarp", "tpa": "tpa",
+            "rally": "rally", "requests": "req", "settings": "tpset",
+            "blacklist": "tpblock", "admin": "tpadmin", "blocktp": "blocktp", "random": "tpr",
+            "public": "pubwarp", "noapproval": "napwarp", "browser": "pwarp", "crossserver": "cswarp",
             "reload": "rld", "accept": "y", "refuse": "n"
         },
         "skins": {
@@ -363,17 +363,19 @@ bool Config::load() {
 
 // 旧版默认指令名 → 现在的新默认名（指令名统一改短, rallyjoin 并进了 accept）
 namespace {
+// 默认指令名改回 JS 版那套（mywarp/pubwarp/...）后, 之前跟着"缩短版"改过名的配置会留成
+// pw/pub/nap/... —— 这里把它们推回新版默认名（只动仍然是旧默认值的项, 用户自己取的名字不动）
 constexpr std::pair<char const*, char const*> kLegacyCommandNames[] = {
-    {"private",     "mywarp"},
-    {"public",      "pubwarp"},
-    {"noapproval",  "napwarp"},
-    {"browser",     "pwarp"},
-    {"rally",       "rally"},
-    {"settings",    "tpset"},
-    {"blacklist",   "tpblock"},
-    {"admin",       "tpadmin"},
-    {"blocktp",     "blocktp"},
-    {"crossserver", "cswarp"},
+    {"private",     "pw"},
+    {"public",      "pub"},
+    {"noapproval",  "nap"},
+    {"browser",     "list"},
+    {"rally",       "call"},
+    {"settings",    "set"},
+    {"blacklist",   "blk"},
+    {"admin",       "adm"},
+    {"blocktp",     "btp"},
+    {"crossserver", "cs"},
 };
 } // namespace
 

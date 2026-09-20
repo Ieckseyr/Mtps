@@ -16,6 +16,9 @@ using json = nlohmann::json;
 
 class Config {
 public:
+    // 出厂默认配置（指令名等）: 插件侧也要用它判断"这个名字是不是我们出厂的"
+    static json defaultConfig();
+
     static Config& getInstance();
 
     bool load();
@@ -197,7 +200,7 @@ private:
     bool mBroadcastToGame{true};
 
     void buildCaches();
-    json defaultConfig() const;
+
     // 老配置的兼容收拾（下线项、改名的指令）, 返回是否真的改了东西
     bool migrateLegacy();
 };
