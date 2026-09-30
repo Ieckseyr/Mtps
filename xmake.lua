@@ -54,10 +54,25 @@ target("Mtps")
     -- 暂时退回普通导入做对照: /DELAYLOAD + delayimp 那一版在本机上会把
     -- LL 指令接口搞成"内部访问冲突"（见 HoloLoad.cpp 的说明）, 先验一遍是不是它
     add_links("HologramLib")
+    -- version.lib: BDS 版本检测的 exe FileVersion 后备路径用（GetFileVersionInfoSize 等）
+    add_syslinks("version")
 
     add_headerfiles("src/**.h")
     add_files("src/**.cpp")
     add_includedirs("src")
+
+    -- cubiomes-bedrock：按种子推算群系与近似地表高度（预落点池用），与 ZXDash 底图同一个库，
+    -- 保证"MTPS 判定的群系"和"地图上看到的底图"一致。
+    -- BiomeSampler.cpp 是唯一引这些头的翻译单元，不得再引 MC/LL 头（enum Dimension 会重定义冲突）
+    add_files(
+        "third_party/cubiomes/generator.c",
+        "third_party/cubiomes/biomenoise.c",
+        "third_party/cubiomes/noise.c",
+        "third_party/cubiomes/layers.c",
+        "third_party/cubiomes/biomes.c",
+        "third_party/cubiomes/util.c",
+        "third_party/cubiomes/mt.c")
+    add_includedirs("third_party/cubiomes")
 
     if is_config("target_type", "server") then
         add_defines("LL_PLAT_S")

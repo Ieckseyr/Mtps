@@ -1,5 +1,6 @@
 ﻿#include "ArchiveScanner.h"
 #include "RandomTeleportInternal.h"
+#include "SurfaceRules.h"
 
 #include <ll/api/mod/NativeMod.h>
 
@@ -68,6 +69,14 @@ ScanResult findSurfaceSafe(
     double tpZ = blockZ + 0.5;
     auto blockAt = [&](int y) -> Block const& { return bs.getBlock(BlockPos(blockX, y, blockZ)); };
 
+    // 树叶对找地表是透明的（见 SurfaceRules.h）：穿过它继续往下，落点取它下面的地面，
+    // 否则森林里的落点全是树冠顶。读方块比取名字贵，所以下面每处只查一次、判完空气再判树叶。
+    auto solidNonLeafAt = [&](int y) -> bool {
+        Block const& b = blockAt(y);
+        if (b.isAir()) return false;
+        return !isLeafBlockName(b.getTypeName());
+    };
+
     // 提示位置上方必须是空气才敢从它开始往下找, 否则可能在悬崖/洞穴内部,
     // 会落到底下而不是地表。试不中直接走完整流程, 所以不会改变结果。
     if (hintY != RTP_NO_HINT && hintY > yRange.minY) {
@@ -79,6 +88,7 @@ ScanResult findSurfaceSafe(
                 if (bot.isAir()) continue;                 // 先判空气: 多数格子都是空气, 省掉取名字
                 std::string const botName = bot.getTypeName();
                 if (isWaterName(botName) || dangerSet.count(botName)) continue;
+                if (isLeafBlockName(botName)) continue;    // 树冠: 继续往下找地面
                 if (blockAt(y + 1).isAir() && blockAt(y + 2).isAir()) {
                     res.found = true;
                     res.pos   = {tpX, (double)(y + 1), tpZ, dim};
@@ -88,10 +98,10 @@ ScanResult findSurfaceSafe(
         }
     }
 
-    // 第一步：大步（8 格）往下找地表
+    // 第一步：大步（8 格）往下找地表（树叶不算地表）
     int coarseSolidY = -1;
     for (int y = scanStartY; y >= yRange.minY; y -= 8) {
-        if (!blockAt(y).isAir()) { coarseSolidY = y; break; }
+        if (solidNonLeafAt(y)) { coarseSolidY = y; break; }   // 一次 getBlock 判完空气与树叶
     }
     if (coarseSolidY == -1) {
         res.reason    = "整列空气(虚空)";
@@ -103,9 +113,10 @@ ScanResult findSurfaceSafe(
     int surfaceY = coarseSolidY;
     int fineTop  = std::min(coarseSolidY + 7, scanStartY);
     for (int y = fineTop; y > coarseSolidY; y--) {
-        if (!blockAt(y).isAir()) { surfaceY = y; break; }
+        if (solidNonLeafAt(y)) { surfaceY = y; break; }
     }
 
+    res.surfaceY      = surfaceY;   // 地表高度（可能后面判为不可用, 但仍可当下一列的提示）
     std::string surfaceName = blockAt(surfaceY).getTypeName();
 
     // 地表是水：逐格判定水深（身高 1.8 格: 水深 2 格头就浸水里）
@@ -142,6 +153,7 @@ ScanResult findSurfaceSafe(
         std::string const botName = bot.getTypeName();
         if (isWaterName(botName)) continue;        // 水块：向下找地板
         if (dangerSet.count(botName)) continue;    // 危险方块：向下
+        if (isLeafBlockName(botName)) continue;    // 树冠：向下找地面（不在树顶落脚）
         if (blockAt(y + 1).isAir() && blockAt(y + 2).isAir()) { // 上方两格空气（身高 2 格）
             res.found = true;
             res.pos   = {tpX, (double)(y + 1), tpZ, dim};
@@ -187,6 +199,31 @@ bool findSafeInSurface(
     return true;
 }
 
+
+// 中心向外的列扫描顺序（按到 chunk 中心的切比雪夫距离分圈）。行序扫的话命中列可能离目标很远，
+// 按圈扫先看中心附近（与预计算表"取离 chunk 中心最近的可用列"同一口径），
+// 而且陆地上通常最内几圈就命中，整块的工作量小得多。
+struct LxLz { uint8_t lx, lz; };
+std::vector<LxLz> const& centerOutOrder() {
+    static std::vector<LxLz> const v = [] {
+        std::vector<LxLz> o;
+        o.reserve(256);
+        for (int r = 0; r <= 8; r++) {
+            for (int lx = 0; lx < 16; lx++) {
+                for (int lz = 0; lz < 16; lz++) {
+                    if (std::max(std::abs(lx - 8), std::abs(lz - 8)) == r) {
+                        o.push_back({(uint8_t)lx, (uint8_t)lz});
+                    }
+                }
+            }
+        }
+        return o;
+    }();
+    return v;
+}
+// 先扫的内圈半径（列）。2 圈 = 25 列，覆盖 5x5 —— 陆地几乎必然命中。
+constexpr int kInnerRings = 2;
+
 // 数据源①: 内存缓存（Loaded 终态, 数据完整且最新, 零 IO）
 bool scanChunkMemory(
     Dimension& dim, int dimid, int cx, int cz,
@@ -195,6 +232,17 @@ bool scanChunkMemory(
     SafePos& out
 ) {
     BlockSource& bs = dim.getBlockSourceFromMainChunkSource();
+
+    // 先扫中心 5x5：陆地几乎必然命中，常见情况的扫描量从最多 256 列降到 25 列。
+    // 没命中才走下面的水域快筛 + 全列扫描（那两条留给大洋/异常地形）。
+    int hintY = RTP_NO_HINT;   // 上一列的地表高度, 喂给下一列省掉粗扫
+    for (auto const& c : centerOutOrder()) {
+        if (std::max(std::abs((int)c.lx - 8), std::abs((int)c.lz - 8)) > kInnerRings) break;
+        auto res = findSurfaceSafe(bs, cx * 16 + c.lx, cz * 16 + c.lz, dimid, yRange, scanStartY,
+                                   dangerSet, hintY);
+        if (res.found) { out = res.pos; return true; }
+        if (res.surfaceY != RTP_NO_HINT) hintY = res.surfaceY;   // 没站位也有地表高度可用作提示
+    }
 
     // 纯水域快筛: 隔一格取 8x8 = 64 个样本列, 全是深水/虚空就认为整块是大洋, 不必扫 256 列。
     // 这一步是有损的: 采样点没覆盖到的孤立 1x1 小柱仍可能被漏掉, 后果是那次传送换个点重随,
@@ -215,14 +263,13 @@ bool scanChunkMemory(
         }
     }
 
-    int hintY = RTP_NO_HINT;   // 上一列的地表高度, 喂给下一列省掉粗扫
-    for (int lx = 0; lx < 16; lx++) {
-        for (int lz = 0; lz < 16; lz++) {
-            auto res = findSurfaceSafe(bs, cx * 16 + lx, cz * 16 + lz, dimid,
-                                       yRange, scanStartY, dangerSet, hintY);
-            if (res.found) { out = res.pos; return true; }
-            if (res.found) hintY = (int)res.pos.y;   // 只有真找到才更新, 别把旧值当新提示
-        }
+    for (auto const& c : centerOutOrder()) {
+        auto res = findSurfaceSafe(bs, cx * 16 + c.lx, cz * 16 + c.lz, dimid,
+                                   yRange, scanStartY, dangerSet, hintY);
+        if (res.found) { out = res.pos; return true; }
+        // 没找到时也能拿到"这列的地表高度"当下一列的提示（原来那句更新写在 return 之后,
+        // 永远执行不到 —— 提示机制其实一直没生效）。提示只加速、不改变结果。
+        if (res.surfaceY != RTP_NO_HINT) hintY = res.surfaceY;
     }
     return false;
 }

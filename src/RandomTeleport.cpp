@@ -4,8 +4,11 @@
 // 演进过程与各数据源的取舍见 README「随机传送怎么找安全落点」。
 #include "RandomTeleportInternal.h"
 #include "ArchiveScanner.h"
+#include "BiomeSampler.h"
 #include "Config.h"
 #include "Economy.h"
+#include "PoolWarmer.h"
+#include "PreLandingPool.h"
 #include "TpUtil.h"
 
 #include <ll/api/service/Bedrock.h>
@@ -22,6 +25,7 @@
 #include <mc/world/actor/player/Player.h>
 #include <mc/world/level/Level.h>
 #include <mc/world/level/BlockSource.h>
+#include <mc/world/level/BlockPos.h>
 #include <mc/world/level/block/Block.h>
 #include <mc/world/level/dimension/Dimension.h>
 #include <mc/world/level/chunk/ChunkSource.h>
@@ -41,6 +45,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <algorithm>
 #include <climits>
@@ -65,10 +70,26 @@ static void sendActionbar(Player& p, std::string const& text) {
     pkt.sendTo(p);
 }
 
-// Debug 日志（config: randomTeleport.debug, 开启时输出详细流程与时间戳）
+// 落点位置带 +0.5 偏移: 负数直接强转会向上取整, 日志里看起来与"落点区块"差一格。
+// 统一取 floor 才是它真正落在的方块（排查"落点到底在哪"时不会再自相矛盾）。
+inline int blockXOf(double v) { return (int)std::floor(v); }
+
+// 每个玩家最近一次随机传送的落点（只用于"连续两次别落同一片"的间隔约束；重启即忘，
+// 不影响任何正确性）。单线程（都在 tick 里）访问，无需加锁。
+static std::unordered_map<std::string, std::pair<int, int>>& sLastLanding() {
+    static std::unordered_map<std::string, std::pair<int, int>> m;
+    return m;
+}
+
+// Debug 日志（config: 顶层 debug 或 randomTeleport.debug，两者任一开着都输出）
 // 定义放这里, 声明在 RandomTeleportInternal.h（三个实现文件共用）
 ll::io::Logger& rtpLogger() { return ll::mod::NativeMod::current()->getLogger(); }
-bool            rtpDebugEnabled() { return Config::getInstance().randomDebug(); }
+bool            rtpDebugEnabled() {
+    // 顶层 debug 是总开关（README 与 Config.h 都这么写）。以前这里只读 randomTeleport.debug,
+    // 于是"把 debug 打开"的人看不到随机传送的任何过程 —— 两个开关任一为真即输出。
+    auto& cfg = Config::getInstance();
+    return cfg.debug() || cfg.randomDebug();
+}
 char const* chunkStateName(ChunkState st) {
     switch (st) {
         case ChunkState::Unloaded:                   return "Unloaded";
@@ -135,11 +156,37 @@ struct RandomTeleport::Session {
     YRange      yRange;
     int         scanStartY{0};
 
-    int         reRandomLeft{6};
+    int         reRandomLeft{6};   // 见 start(): 由 config randomTeleport.maxAttempts 决定（有上限保护）
     bool        usedKnownFallback{false};  // 重随名额用尽后是否已试过"已知安全点"兜底
     std::vector<std::pair<int,int>> triedTargets;
 
     int         randomX{0}, randomZ{0};
+
+    // 预落点池命中信息（未命中时 poolHit=false，一切照旧走降级链路）
+    bool        poolHit{false};
+    bool        poolProbed{false};   // 该点的 chunk 已经过判定（决定要不要回写失效）
+    int         poolX{0}, poolZ{0};  // 池里的点本身（回写状态用；可能被抖动过）
+    int         poolTier{0};         // kPlTierLoaded / kPlTierUnloaded
+
+    // 落点缓存：等"周围区块加载完"的这段（最多 40 拍）里，每 tick 重扫同一个区块是纯浪费 ——
+    // 一次内存全列扫描约 1ms，实测 12 拍就是 12ms 的额外 MSPT。缓存住上次扫到的落点，
+    // 只在新落点/超过 10 拍时才真正重扫（地形在这几百毫秒里不会变）。
+    bool    haveCachedPos{false};
+    SafePos cachedPos{};
+    int     cachedPosCX{0}, cachedPosCZ{0};
+    int64_t cachedPosTick{0};
+
+    // 诊断计数（会话结束时汇总成一行，让人一眼看懂这次传送到底经历了什么）
+    int         statPoolMiss{0};      // 池没给点（未就绪/圆内无点）
+    int         statUnsafeRounds{0};  // 候选点判定为"整块无安全列"的次数
+    int         statNoDataRounds{0};  // 候选点需要生成（存档里没有）的次数
+    int         statExpandMax{0};     // 扩圈最深到第几圈
+    int         statGenWaits{0};      // 等区块生成的轮次
+    int         statGenTicks{0};      // 等区块生成累计拍数（含邻域等待，见汇总行）
+    int         statNbrTicks{0};      // 其中"等周围一圈"的拍数
+    int         statMemScan{0};       // 走内存扫描判定安全的次数
+    int         statTableHit{0};      // 走落点表判定安全的次数
+    int         statArchiveHit{0};    // 走存档直读判定安全的次数
 
     std::unordered_set<std::string> dangerSet;      // 全名（minecraft:xxx, BlockSource 用）
     std::unordered_set<std::string> dangerShortSet; // 短名（无前缀, 存档 palette 用）
@@ -191,11 +238,22 @@ static std::mt19937_64& rng() { static std::mt19937_64 r{std::random_device{}()}
 // 确保会话的常加载区域覆盖 (blockX, blockZ) 为中心、radiusChunks 为半径的圆
 // 区域名每次换区都带新序号 → 撤旧建新（同 tick）不会名字冲突
 void RandomTeleport::ensureTickingArea(Session& s, Level& level, int blockX, int blockZ, int radiusChunks) {
-    if (s.areaValid && s.areaDim == s.dimid && s.areaRadius == radiusChunks
-        && s.areaCX == blockX && s.areaCZ == blockZ) {
-        return; // 已就位
+    // 现有区域盖得住这个位置就什么都不做。以前这里按"方块坐标完全相同"判断，落点差 1 格就
+    // 重新登记：先撤旧区域，覆盖这些区块的引用立刻没了，引擎当场把刚生成好的区块卸掉（实测
+    // 日志里 状态=Loaded 隔一拍变 Unloaded），新区域又让它从头加载，卡在 StructPostProcDone
+    // 直到 200 tick 超时——一次传送白等 10 秒。区域是圆、有半径，差几个方块不影响它兜住同一批块。
+    if (s.areaValid && s.areaDim == s.dimid && s.areaRadius >= radiusChunks) {
+        int const dcx   = (blockX >> 4) - (s.areaCX >> 4);
+        int const dcz   = (blockZ >> 4) - (s.areaCZ >> 4);
+        int const slack = s.areaRadius - radiusChunks;   // 还能偏几个区块、仍被完全覆盖
+        if (std::abs(dcx) <= slack && std::abs(dcz) <= slack) return;
     }
-    if (s.areaValid) removeRtpArea(level, s.areaDim, s.areaName); // 换点/重随: 先撤旧区域
+
+    // ② 真要换地方: 先挂新区域、再撤旧的 —— 顺序不能反, 中间空一拍区块就会被卸掉。
+    //    旧区域延后撤（新区块与旧的覆盖范围可能重叠, 同 tick 撤会把重叠部分一起卸掉）。
+    std::string const oldName = s.areaName;
+    bool const        hadOld  = s.areaValid;
+    int const         oldCX   = s.areaCX, oldCZ = s.areaCZ;
 
     s.areaName = makeAreaName(s.playerName); // 新序号名（永不重名, 无冲突窗口）
     // 直接登记引擎的常加载区域（不落盘、无残留; 区域内的区块由引擎每 tick 加载/生成）
@@ -206,9 +264,19 @@ void RandomTeleport::ensureTickingArea(Session& s, Level& level, int blockX, int
         s.areaRadius = radiusChunks;
         s.areaCX     = blockX;
         s.areaCZ     = blockZ;
-        RTP_DBG("[RTP][区域] 已登记常加载区域 circle r={} 区块 @({}, {}) dim={} 名={}",
-                radiusChunks, blockX, blockZ, s.dimid, s.areaName);
+        if (hadOld) {
+            scheduleAreaRemoval(s.playerName, oldName, s.dimid, RTP_AREA_HANDOVER_TICKS,
+                                oldCX >> 4, oldCZ >> 4);
+            RTP_DBG("[RTP][区域] 换点: 先挂新区域 {} @({}, {}), 旧的 {} 延后 {} tick 撤",
+                    s.areaName, blockX, blockZ, oldName, RTP_AREA_HANDOVER_TICKS);
+        } else {
+            RTP_DBG("[RTP][区域] 已登记常加载区域 circle r={} 区块 @({}, {}) dim={} 名={}",
+                    radiusChunks, blockX, blockZ, s.dimid, s.areaName);
+        }
     } else {
+        // 登记失败: 保留旧区域与它的名字（别把已有的引用丢掉, 那正好会卸掉区块）
+        s.areaName  = hadOld ? oldName : std::string{};
+        s.areaValid = hadOld;
         rtpLogger().warn("[RTP] 常加载区域登记失败(status={}): 中心 ({}, {}) r={} 区块 dim={}"
                          "（本次传送可能超时）", (int)st, blockX, blockZ, radiusChunks, s.dimid);
     }
@@ -224,7 +292,7 @@ void RandomTeleport::cleanupSessionArea(Session& s) {
     if (!level) return; // 关服末期拿不到 Level: 残留区域由下次启动的前缀清理兜底
 
     if (s.keepAreaAfterTeleport) {
-        scheduleAreaRemoval(s.areaName, s.areaDim, RTP_AREA_GRACE_TICKS,
+        scheduleAreaRemoval(s.playerName, s.areaName, s.areaDim, RTP_AREA_GRACE_TICKS,
                             s.areaCX >> 4, s.areaCZ >> 4);
         RTP_DBG("[RTP][区域] 传送成功, {} 保留 {} tick 宽限期 (dim={})",
                 s.areaName, RTP_AREA_GRACE_TICKS, s.areaDim);
@@ -235,9 +303,10 @@ void RandomTeleport::cleanupSessionArea(Session& s) {
 }
 
 // 宽限期待撤区域
-void RandomTeleport::scheduleAreaRemoval(std::string const& name, int dim, int delayTicks,
-                                         int landingCX, int landingCZ) {
-    mGraceAreas.push_back(GraceArea{name, dim, mTickCounter + delayTicks, landingCX, landingCZ});
+void RandomTeleport::scheduleAreaRemoval(std::string const& playerName, std::string const& name,
+                                         int dim, int delayTicks, int landingCX, int landingCZ) {
+    mGraceAreas.push_back(
+        GraceArea{name, playerName, dim, mTickCounter + delayTicks, landingCX, landingCZ});
 }
 
 void RandomTeleport::processGraceAreas() {
@@ -261,10 +330,20 @@ void RandomTeleport::processGraceAreas() {
             auto dim = level->getDimension((::DimensionType)it->dim).lock();
             if (dim) {
                 ChunkState st = chunkStateAt(*dim, it->lcx << 4, it->lcz << 4);
+                // 玩家已离线 / 已跑远 → 区块卸载是正常的（没有视野引用它），不能按"灰屏"报警。
+                // 实测这条虚警把"玩家传送后 4 秒断线"误报成了"会出现灰屏"。
+                bool nearby = false;
+                if (auto* p2 = level->getPlayer(it->playerName)) {
+                    auto const pos = p2->getPosition();
+                    nearby = (p2->getDimensionId() == (::DimensionType)it->dim)
+                          && std::abs((int)pos.x - (it->lcx << 4)) < 128
+                          && std::abs((int)pos.z - (it->lcz << 4)) < 128;
+                }
                 RTP_DBG("[RTP][自检] 撤区域后落点区块({},{}) 状态={}{}",
                         it->lcx, it->lcz, chunkStateName(st),
                         st >= ChunkState::Loaded ? "（玩家视野已接管, 正常）"
-                                                 : "（未被接管, 会出现灰屏）");
+                        : !nearby                 ? "（玩家已离线/离开该处, 卸载属正常）"
+                                                  : "（未被接管, 会出现灰屏）");
             }
         }
         it = mGraceAreas.erase(it);
@@ -315,6 +394,10 @@ void RandomTeleport::start(Player& player, RtpOptions const& opts) {
     s->dimid      = opts.dimid;
     s->message    = opts.message.empty() ? "§a[随机传送] §f已传送！" : opts.message;
     s->cost       = opts.cost;
+    // 候选点重试名额 = config 的 maxAttempts。这个键以前只被读取、从未生效（重试次数写死在
+    // 会话里的 6），配成 200 也还是只试 6 次。上限 16：每次尝试都可能要生成一整个区块
+    // （r=2 的区域 = 25 块），无上限会把生成队列塞爆；会话 60 秒总超时仍是兜底。
+    s->reRandomLeft = std::min(16, std::max(1, Config::getInstance().randomMaxAttempts()));
     s->radius     = std::max(1, opts.radius);
     s->usePlayerOrigin = (opts.originMode == "player");
     s->originX = opts.originX;
@@ -356,6 +439,12 @@ void RandomTeleport::start(Player& player, RtpOptions const& opts) {
 
 // 选新随机落点（玩家原地不动, 只更新会话目标）
 void RandomTeleport::pickNewTarget(Session& s) {
+    // ① 预落点池优先：池里的点是预先算好的（已加载类 = 存档内已知安全点；未加载类 =
+    //    cubiomes 按世界种子推算的候选点）。命中即用 —— 命中率与半径无关（内部按空间桶采样，
+    //    不是对整张表做拒绝采样）。
+    if (tryPoolLanding(s)) return;
+
+    // ② 池不可用/未命中 → 原有链路（这就是"降级策略"，行为与改造前完全一致）
     // 配置开了就先试"存档里已知安全"的已生成地块（落点确定、不用等地形生成）
     if (Config::getInstance().randomPreferKnown() && tryKnownLanding(s)) return;
 
@@ -363,6 +452,11 @@ void RandomTeleport::pickNewTarget(Session& s) {
     int avoidDist = std::min(640, std::max(128, s.radius / 4));
     std::uniform_real_distribution<double> dist01(0, 1);
     double angle = 0, dist = 0;
+    // 群系预筛（降级路径也享受）：均匀随机点里约三成落在海洋/河流上，那种点必然要
+    // 白生成一整个区块、再判定"整块无安全列"（实测白等 5.8 秒）。先在群系图上筛掉它，
+    // 成本是每次约 0.1ms 的单点采样、最多 4 次。采样器没配好（极早期/池关闭）就跳过。
+    int  biomeFilters = 0;
+    bool biomeFiltered = false;
     for (int tries = 0; tries < 12; tries++) {
         angle = dist01(rng()) * kPi * 2;
         dist  = std::sqrt(dist01(rng())) * s.radius;
@@ -372,6 +466,17 @@ void RandomTeleport::pickNewTarget(Session& s) {
         for (auto& t : s.triedTargets) {
             double dx = t.first - cx, dz = t.second - cz;
             if (dx*dx + dz*dz < (double)avoidDist*avoidDist) { tooClose = true; break; }
+        }
+        if (!tooClose && biomeFilters < 4) {
+            auto& sampler = BiomeSampler::getInstance();
+            if (sampler.ready()) {
+                auto const sr = sampler.sample((int)std::lround(cx), (int)std::lround(cz));
+                biomeFilters++;
+                if (sr.ok && sr.excluded) {
+                    biomeFiltered = true;
+                    tooClose      = true;   // 复用同一个"换一个"分支
+                }
+            }
         }
         if (!tooClose) break;
         if (tries == 11) { angle = dist01(rng()) * kPi * 2; dist = std::sqrt(dist01(rng())) * s.radius; }
@@ -383,12 +488,71 @@ void RandomTeleport::pickNewTarget(Session& s) {
     RTP_DBG("[RTP][落点] #{} ({}, {}) 距原点{}格{}", s.triedTargets.size(), s.randomX, s.randomZ,
             (int)std::round(dist), s.triedTargets.size() > 1
                 ? "（重随, 剩余名额" + std::to_string(s.reRandomLeft) + "）" : "");
+    if (biomeFiltered) {
+        RTP_DBG("[RTP][落点] 已按群系预筛掉 {} 个落点（海洋/河流等被排除群系, 那些点会白生成一次）",
+                biomeFilters);
+    }
 
     s.state        = Session::PROBE;
     s.chunkWait    = 0;
     s.expandRing   = 0;
     s.expandIdx    = 0;
     s.landingHolds = 0;
+    s.haveCachedPos = false;   // 换了目标 → 上次缓存的落点作废
+}
+
+// 从预落点池抽一个候选点当落点：已加载类是落点表来的已知安全点（只需载入区块），
+// 未加载类是 cubiomes 推的候选点（需要生成，这是唯一允许的等待）。
+// pick() 返回的坐标就是传送目标，回写状态也用同一坐标。
+bool RandomTeleport::tryPoolLanding(Session& s) {
+    auto& pool = PreLandingPool::getInstance();
+    if (!pool.usable()) {
+        // 池不可用（未启用/还没补齐/该维度没有点）→ 静默降级。但要把原因说出来，
+        // 否则"为什么没走快路径"从日志上完全看不出来。
+        s.statPoolMiss++;
+        RTP_DBG("[RTP][预落点池] 不可用（未启用 / 还没补齐 / 维度{}没有点）→ 本次走降级链路",
+                s.dimid);
+        return false;
+    }
+
+    PreLandingPool::Pick pick{};
+    // 同一玩家上次落点作为"间隔约束"（池里没有更远的点时会自动放开, 不会因此失败）
+    int const  avoidR = Config::getInstance().landingPoolHitRadius();
+    auto const it     = sLastLanding().find(s.playerName);
+    int const  avX    = (it != sLastLanding().end()) ? it->second.first : 0;
+    int const  avZ    = (it != sLastLanding().end()) ? it->second.second : 0;
+    if (!pool.pick(s.dimid, s.originX, s.originZ, s.radius, rng()(), avX, avZ,
+                   it != sLastLanding().end() ? avoidR : 0, pick)) {
+        s.statPoolMiss++;
+        RTP_DBG("[RTP][预落点池] 圆内（原点 ({:.0f},{:.0f}) 半径 {}）没有可用预落点 → 降级",
+                s.originX, s.originZ, s.radius);
+        return false;
+    }
+
+    s.poolHit    = true;
+    s.poolProbed = false;
+    s.poolX      = pick.x;
+    s.poolZ      = pick.z;
+    s.poolTier   = pick.tier;
+    s.randomX    = pick.targetX;
+    s.randomZ    = pick.targetZ;
+    s.triedTargets.push_back({s.randomX, s.randomZ});
+
+    RTP_DBG("[RTP][落点] #{} ({}, {}) 取自预落点池{}（池点即目标, 距原点 {} 格, 群系 {}, 参考高度 {}）",
+            s.triedTargets.size(), s.randomX, s.randomZ,
+            pick.tier == kPlTierLoaded ? "[已加载类: 存档内已知安全, 只需载入区块]"
+                                       : "[未加载类: 待生成, cubiomes 推算]",
+            (int)std::lround(std::sqrt((double)(pick.x - s.originX) * (pick.x - s.originX)
+                                       + (double)(pick.z - s.originZ) * (pick.z - s.originZ))),
+            pick.biome, pick.hintY);
+
+    s.state        = Session::PROBE;
+    s.chunkWait    = 0;
+    s.expandRing   = 0;
+    s.expandIdx    = 0;
+    s.landingHolds = 0;
+    s.haveCachedPos = false;   // 换了目标 → 上次缓存的落点作废
+    return true;
 }
 
 // 从存档落点表里抽一个"圆盘半径内、且已有安全落点"的已生成 chunk 当落点。
@@ -409,6 +573,7 @@ bool RandomTeleport::tryKnownLanding(Session& s) {
     s.expandRing   = 0;
     s.expandIdx    = 0;
     s.landingHolds = 0;
+    s.haveCachedPos = false;   // 换了目标 → 上次缓存的落点作废
     return true;
 }
 
@@ -457,21 +622,47 @@ void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos
             bool const aroundOk = chunkOk
                 && s.areaValid && findRtpArea(*level, s.areaDim, s.areaName) != nullptr
                 && landingNeighborhoodReady(*dim, bx, bz, RTP_WAIT_AREA_RADIUS_CHUNKS);
-            if (!chunkOk || (!aroundOk && s.landingHolds < RTP_LANDING_HOLD_TICKS)) {
+            int const holdLimit = Config::getInstance().landingHoldTicks();
+            if (!chunkOk || (!aroundOk && s.landingHolds < holdLimit)) {
                 // 换落点了才把等待计数清零; 同一落点继续累加（LOAD_CHUNK 的超时要能按期触发,
                 // 否则一个卡住的落点会一路拖到会话总超时）
                 bool const sameLanding = (s.randomX == bx && s.randomZ == bz);
                 if (!sameLanding)      s.chunkWait = 0;
-                else if (chunkOk)      s.landingHolds++;
+                else if (chunkOk) { s.landingHolds++; s.statNbrTicks++; }
                 ensureTickingArea(s, *level, bx, bz, RTP_WAIT_AREA_RADIUS_CHUNKS);
                 s.randomX = bx;
                 s.randomZ = bz;
+                // 缓存这个落点：等"周围区块"的这段里复用它，别每拍重扫一遍
+                s.haveCachedPos = true;
+                s.cachedPos     = *pos;
+                s.cachedPosCX   = bx >> 4;
+                s.cachedPosCZ   = bz >> 4;
+                s.cachedPosTick = mTickCounter;
                 s.state   = Session::LOAD_CHUNK;
-                if (s.landingHolds == 1 || s.landingHolds % 20 == 0) {
-                    RTP_DBG("[RTP][落点] 落点区块 ({},{}) {} → 继续等（第{}拍）", bx, bz,
-                            chunkOk ? "周围还没加载完" : "未就绪", s.landingHolds);
+                if (s.landingHolds == 1 || s.landingHolds % 10 == 0) {
+                    // 把"在等什么"说清楚: 落点区块自身没就绪 / 区域还没被引擎受理 / 周围一圈没加载完
+                    bool const areaActive = s.areaValid
+                        && findRtpArea(*level, s.areaDim, s.areaName) != nullptr;
+                    RTP_DBG("[RTP][落点] 落点区块 ({},{}) 继续等（第{}拍）: {}", bx, bz,
+                            s.landingHolds,
+                            !chunkOk      ? "落点区块自身未就绪"
+                            : !areaActive ? "常加载区域还没激活（引擎尚未受理）"
+                                          : "周围区块还没加载完（等 (2r+1)^2 全就绪）");
                 }
                 return;   // 不结束会话: 交给 LOAD_CHUNK 等
+            }
+            // 落点复核（debug）: 把落点脚下与身位的方块名打出来。落点质量好不好，
+            // 看这一行就够了（落在树冠上会是 *_leaves、落在水里会是 water）。
+            // 只有 debug 才读，3 次方块查询，且块已加载。
+            if (rtpDebugEnabled()) {
+                auto& bs2 = dim->getBlockSourceFromMainChunkSource();
+                auto  nm  = [&](int y) -> std::string {
+                    return bs2.getBlock(BlockPos(bx, y, bz)).getTypeName();
+                };
+                RTP_DBG("[RTP][落点复核] ({},{},{}) 脚下={} 脚={} 头={} 头2={}",
+                        bx, (int)std::floor(pos->y), bz, nm((int)std::floor(pos->y) - 1),
+                        nm((int)std::floor(pos->y)), nm((int)std::floor(pos->y) + 1),
+                        nm((int)std::floor(pos->y) + 2));
             }
             // 放行: 另挂一个以落点为中心的宽限区域。
             // 不能像以前那样"把等待区域改挂/扩到落点" —— 那要先撤掉覆盖落点的旧区域,
@@ -482,7 +673,7 @@ void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos
                 std::string const gname = makeAreaName(s.playerName);
                 if (addRtpArea(*level, s.dimid, gname, bx, bz, RTP_GRACE_AREA_RADIUS_CHUNKS)
                     == ::AddTickingAreaStatus::Success) {
-                    scheduleAreaRemoval(gname, s.dimid, RTP_AREA_GRACE_TICKS, bx >> 4, bz >> 4);
+                    scheduleAreaRemoval(s.playerName, gname, s.dimid, RTP_AREA_GRACE_TICKS, bx >> 4, bz >> 4);
                     RTP_DBG("[RTP][区域] 落点 ({}, {}) 另挂 r={} 宽限区域 {}", bx, bz,
                             RTP_GRACE_AREA_RADIUS_CHUNKS, gname);
                 }
@@ -501,6 +692,29 @@ void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos
         s.keepAreaAfterTeleport = true;   // 区域撤离交给宽限期（见 cleanupSessionArea）
     }
     s.finished = true;
+    // 记下落点，供该玩家下次传送做间隔约束（连续两次别落同一片）
+    if (success && pos) {
+        sLastLanding()[s.playerName] = {(int)std::floor(pos->x), (int)std::floor(pos->z)};
+    }
+    // 池的自愈全靠这里：未加载类的点生成后扫描通过就升级为已加载类（下次只需载入区块），
+    // 判定无安全列或整场失败就标失效、由后台补齐换掉。已加载类不回写——它们本来就来自
+    // 落点表，表才是权威，不该被一次超时拉黑。
+    // 通知预热器：这个点被用过了 → 释放它的常驻位（区块让引擎按需卸载，位子留给下一个预热点）
+    if (s.poolHit) PoolWarmer::getInstance().noteUsed(s.dimid, s.poolX, s.poolZ);
+    if (s.poolHit && s.poolProbed && s.poolTier == kPlTierUnloaded) {
+        auto& pool = PreLandingPool::getInstance();
+        bool const sameChunk = pos && ((int)std::floor(pos->x) >> 4) == (s.poolX >> 4)
+                                    && ((int)std::floor(pos->z) >> 4) == (s.poolZ >> 4);
+        if (success && sameChunk) {
+            pool.markVerified(s.dimid, s.poolX, s.poolZ, (int)std::lround(pos->y));
+            RTP_DBG("[RTP][预落点池] 池点 ({},{}) 生成后验证通过 y={} → 升级为已加载类",
+                    s.poolX, s.poolZ, (int)std::lround(pos->y));
+        } else {
+            pool.markInvalid(s.dimid, s.poolX, s.poolZ);
+            RTP_DBG("[RTP][预落点池] 池点 ({},{}) {} → 标记失效（后台补齐会补新点）", s.poolX,
+                    s.poolZ, success ? "所在 chunk 无安全列" : "本次会话失败");
+        }
+    }
     if (success && pos) {
         // 下一拍核对客户端的区块发布区域有没有跟到落点（没跟上就是"一片空白"）
         mArrivalChecks.push_back(ArrivalCheck{s.playerName, pos->dimid, pos->x, pos->y, pos->z,
@@ -525,6 +739,14 @@ void RandomTeleport::finishTeleport(Session& s, Player& p, bool success, SafePos
                     s.playerName, msSince(s.startedAt), s.totalTicks, s.triedTargets.size());
         }
     }
+    // 会话汇总（一行看懂"这次传送到底经历了什么"）: 候选从哪来、试了几轮、扩圈多深、
+    // 每种判定各走了几次、等了几轮生成。排查"随机传送很烂"就从这一行开始 ——
+    // 它把前面几十条过程日志压成了结论（耗时/尝试次数见上面的 [RTP][结束] 行）。
+    RTP_DBG("[RTP][汇总] {} {} | 候选{}轮（其中池未命中{}轮） | 无安全列{}次 需生成{}次 扩圈最深{}圈 | "
+            "安全列来源: 内存{} 落点表{} 存档直读{} | 等生成{}轮 {}拍（其中等周围一圈 {}拍）",
+            s.playerName, success ? "成功" : "失败", (int)s.triedTargets.size(), s.statPoolMiss,
+            s.statUnsafeRounds, s.statNoDataRounds, s.statExpandMax, s.statMemScan, s.statTableHit,
+            s.statArchiveHit, s.statGenWaits, s.statGenTicks, s.statNbrTicks);
 }
 
 // 单 chunk 判定（三源逐级）: Safe = 找到安全列 / Unsafe = 有数据但整 chunk 无安全列 /
@@ -534,15 +756,23 @@ RandomTeleport::StepResult RandomTeleport::stepProbe(Session& s, Level& level, P
     SafePos     pos{};
     std::string reason;
     bool        cheap = false;
-    switch (resolveChunk(dim, s.dimid, cx, cz, s.yRange, s.scanStartY,
-                         s.dangerSet, s.dangerShortSet, pos, reason, cheap)) {
+    ChunkSource src   = ChunkSource::None;
+    auto const  verdict = resolveChunk(dim, s.dimid, cx, cz, s.yRange, s.scanStartY,
+                                       s.dangerSet, s.dangerShortSet, pos, reason, cheap, &src);
+    // 池点已经过判定 → 允许在收尾时回写"失效"（池的自愈靠它）
+    if (s.poolHit) s.poolProbed = true;
+    switch (verdict) {
         case ChunkVerdict::Safe:
+            if (src == ChunkSource::Memory)       s.statMemScan++;
+            else if (src == ChunkSource::Table)   s.statTableHit++;
+            else if (src == ChunkSource::Archive) s.statArchiveHit++;
             RTP_DBG("[RTP][探测] #{} ({},{}) {} 命中安全列 ({}, {}, {})",
                     s.triedTargets.size(), s.randomX, s.randomZ,
-                    cheap ? "落点表" : "内存/直读", (int)pos.x, (int)pos.y, (int)pos.z);
+                    cheap ? "落点表" : "内存/直读", blockXOf(pos.x), (int)pos.y, blockXOf(pos.z));
             finishTeleport(s, p, true, &pos);
             return StepResult::Done;
         case ChunkVerdict::Unsafe:
+            s.statUnsafeRounds++;
             RTP_DBG("[RTP][探测] #{} ({},{}) {} → 进入扩圈搜索",
                     s.triedTargets.size(), s.randomX, s.randomZ, reason);
             s.state      = Session::EXPAND;
@@ -551,6 +781,7 @@ RandomTeleport::StepResult RandomTeleport::stepProbe(Session& s, Level& level, P
             return StepResult::Progress;
         case ChunkVerdict::NoData:
         default:
+            s.statNoDataRounds++;
             RTP_DBG("[RTP][探测] #{} ({},{}) {} → TickingArea 生成兜底",
                     s.triedTargets.size(), s.randomX, s.randomZ, reason);
             // 除了登记常加载区域, 再直接向引擎请求这个区块（Deferred: 允许异步生成）
@@ -564,6 +795,8 @@ RandomTeleport::StepResult RandomTeleport::stepProbe(Session& s, Level& level, P
 // 等 TickingArea 把区块推到就绪, 就绪后转去判定
 RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& level, Player& p, Dimension& dim) {
     s.chunkWait++;
+    if (s.chunkWait == 1) s.statGenWaits++;   // 诊断: 这次会话等了几轮区块生成
+    s.statGenTicks++;                         // 诊断: 一共等了多少拍
     if (s.chunkWait > RTP_CHUNK_WAIT_TICKS) {
         // 本落点区块 10 秒仍未生成完成：换点重随或放弃
         RTP_DBG("[RTP][等待] #{} ({},{}) 区块{}tick未就绪(最后状态={}), {}",
@@ -613,6 +846,20 @@ RandomTeleport::StepResult RandomTeleport::stepLoadChunk(Session& s, Level& leve
         }
         return StepResult::Waiting; // 等生成完成, 下 tick 再查
     }
+    // 落点缓存命中（同一区块 + 10 拍内扫过）→ 直接用，省掉整块内存扫描（约 1ms/次）。
+    // 超过 10 拍会自然落到下面的重扫分支复核一次，兼顾"别每拍重扫"与"数据别太旧"。
+    if (s.haveCachedPos && s.cachedPosCX == (s.randomX >> 4) && s.cachedPosCZ == (s.randomZ >> 4)
+        && (mTickCounter - s.cachedPosTick) < 10 && isChunkReady(dim, s.randomX, s.randomZ)) {
+        // 节流：等待期最长 40 拍，以前每拍打一条 —— 光这两行就是每个传送几十条日志写入。
+        // 日志本身也有成本（4.3GB 的日志文件说明这服日志量很大），改成每 5 拍一条。
+        if (s.chunkWait <= 1 || (s.chunkWait % 5) == 0) {
+            RTP_DBG("[RTP][区块就绪] #{} ({},{}) 等待{}tick 状态={}（复用缓存落点, 不重扫）",
+                    s.triedTargets.size(), s.randomX, s.randomZ, s.chunkWait,
+                    chunkStateName(chunkStateAt(dim, s.randomX, s.randomZ)));
+        }
+        finishTeleport(s, p, true, &s.cachedPos);
+        return StepResult::Done;
+    }
     RTP_DBG("[RTP][区块就绪] #{} ({},{}) 等待{}tick 状态={}",
             s.triedTargets.size(), s.randomX, s.randomZ, s.chunkWait,
             chunkStateName(chunkStateAt(dim, s.randomX, s.randomZ)));
@@ -633,12 +880,13 @@ RandomTeleport::StepResult RandomTeleport::stepScanChunk(Session& s, Level& leve
         // 来源标出来: 落点表出来的落点也要走内存复核（表可能是上次开服存下来的,
         // 玩家这期间改过地形就不能照搬）, 这一行能看到到底复核的是哪来的数据
         RTP_DBG("[RTP][落点判定] chunk({},{}) 命中安全列 ({}, {}, {}) 来源={}",
-                cx, cz, (int)pos.x, (int)pos.y, (int)pos.z,
+                cx, cz, blockXOf(pos.x), (int)pos.y, blockXOf(pos.z),
                 src == ChunkSource::Memory ? "内存(实时)" :
                 src == ChunkSource::Table  ? "存档落点表(已复核)" : "存档直读");
         finishTeleport(s, p, true, &pos);
         return StepResult::Done;
     }
+    s.statUnsafeRounds++;
     RTP_DBG("[RTP][落点判定] chunk({},{}) 不安全: {} → 进入扩圈搜索", cx, cz, reason);
     s.state      = Session::EXPAND;
     s.expandRing = 1;
@@ -649,6 +897,7 @@ RandomTeleport::StepResult RandomTeleport::stepScanChunk(Session& s, Level& leve
 // 扩圈搜索: 一圈一圈往外找安全列。昂贵判定（内存扫 / 存档直读）按 tick 配额限,
 // 落点表查询极便宜（一次二分）可以放心多跑; 每 tick 用完配额就把游标存下来下 tick 接着扫。
 RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, Player& p, Dimension& dim) {
+    if (s.expandRing > s.statExpandMax) s.statExpandMax = s.expandRing;   // 诊断: 扩圈最深到哪
     auto& ring = expandRing(s.expandRing);
     int cheapCnt = 0;   // 本 tick 落点表命中次数（独立、宽得多的预算）
     int pending = 0;    // 区内未就绪 chunk 数（等生成, 不耗预算）
@@ -694,7 +943,7 @@ RandomTeleport::StepResult RandomTeleport::stepExpand(Session& s, Level& level, 
         else                                  s.tickScanUsed++;  // 内存扫
         if (v == ChunkVerdict::Safe) {
             RTP_DBG("[RTP][扩圈] r={} chunk({},{}) 命中安全列 ({}, {}, {})",
-                    s.expandRing, ccx, ccz, (int)pos.x, (int)pos.y, (int)pos.z);
+                    s.expandRing, ccx, ccz, blockXOf(pos.x), (int)pos.y, blockXOf(pos.z));
             finishTeleport(s, p, true, &pos);
             return StepResult::Done;
         }
@@ -742,8 +991,31 @@ RandomTeleport::StepResult RandomTeleport::stepSession(Session& s) {
         return StepResult::Done;
     }
 
-    // actionbar 节流（约 500ms 一次）
-    if (s.titleTick <= 0) { sendActionbar(*p, "§e随机传送中......"); s.titleTick = 10; }
+    // actionbar 节流（约 500ms 一次）。
+    // 带上"当前在等什么 + 已经等了多久"：随机传送最慢的一段是等引擎生成区块（实测 1.4~5.8 秒），
+    // 以前这里只有一句不动的"随机传送中......" —— 玩家看不出是在工作还是卡住了。
+    if (s.titleTick <= 0) {
+        int const sec = (int)(msSince(s.startedAt) / 1000);
+        char      buf[160];
+        switch (s.state) {
+            case Session::LOAD_CHUNK: {
+                // 区块状态名是英文枚举，只给阶段与"第几 tick"，玩家看得懂"生成中"
+                std::snprintf(buf, sizeof(buf),
+                              "§e随机传送中… §7目标区块生成中 §8已等 %ds §7(%d tick)", sec,
+                              s.chunkWait);
+                break;
+            }
+            case Session::SCAN_CHUNK:
+            case Session::EXPAND:
+                std::snprintf(buf, sizeof(buf), "§e随机传送中… §7正在找安全落脚点 §8(%ds)", sec);
+                break;
+            default:
+                std::snprintf(buf, sizeof(buf), "§e随机传送中… §7已选好落点 §8(%ds)", sec);
+                break;
+        }
+        sendActionbar(*p, buf);
+        s.titleTick = 10;
+    }
     s.titleTick--;
 
     // 出生流程未完成不传送（否则引擎会把玩家放回出生点, 客户端一片灰; 立刻 /tpr 即复现）。
@@ -813,6 +1085,20 @@ void RandomTeleport::processArrivalChecks() {
 // 调度（多会话轮流推进, 单会话限步数）
 void RandomTeleport::tick() {
     mTickCounter++;
+
+    // 一次性预热群系采样器：主线程第一次调用它时要建一份自己的生成器状态（thread_local），
+    // 首次约几毫秒 —— 与其让它发生在某次传送的判定里（顶出一帧开销），不如开服后就付掉。
+    // 顺带把结果写进 debug 日志：这条日志出现 = "跨线程共用同一个采样器"这条路验证通过。
+    if (!mSamplerWarmed) {
+        auto& sampler = BiomeSampler::getInstance();
+        if (sampler.ready()) {
+            auto const sr = sampler.sample(0, 0);
+            mSamplerWarmed = true;
+            RTP_DBG("[RTP][预热] 主线程群系采样器就绪（原点采样: 群系 {} 是否被排除={} 参考高度 {:.1f}）",
+                    sr.biome, sr.excluded, sr.approxY);
+        }
+    }
+
     // 首个 tick: 清理上次运行崩溃/异常残留的常加载区域（持久化区域重启会被引擎预加载, 必须兜底）
     static bool sPurged = false;
     if (!sPurged) {

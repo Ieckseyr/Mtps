@@ -16,6 +16,8 @@
 #include <memory>
 #include <utility>
 
+#include "SurfaceRules.h"   // 树叶不算地表（三处取面逻辑共用同一规则）
+
 class BedrockLevelReader {
 public:
     // 一个 chunk 列（16x16）的表面扫描结果
@@ -69,6 +71,10 @@ public:
 
     // 该维度表里的 chunk 数（0 = 这一维度存档里什么都没生成, 扩圈扫了也全是无数据）
     size_t landingCountForDim(int dim) const;
+
+    // 只读访问该维度的整张落点表（升序，ready 后不再变）。预落点池的"已加载类"要遍历/等距
+    // 采样整张表，逐块 lookup 做不到；调用方要长期持有就自己拷一份。
+    std::vector<Landing> const& landings(int dim) const;
 
     // 落点表缓存: 把算好的表直接存盘/读回, 省掉整轮 .ldb 扫描 + 逐 chunk 解码
     // （大存档要几分钟且和开服抢磁盘）。调用方用 .ldb 指纹判断缓存是否还对得上。

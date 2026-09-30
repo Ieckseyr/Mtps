@@ -4,8 +4,10 @@
 #include "ArchiveScanner.h"
 #include "Config.h"
 #include "DataStore.h"
+#include "LandingPoolService.h"
 #include "Menu.h"
 #include "Pinyin.h"
+#include "PoolWarmer.h"
 #include "NpcTeleport.h"
 #include "NpcSkin.h"
 #include "HoloLoad.h"
@@ -238,6 +240,7 @@ bool Mtps::enableInner() {
             // 这里漏出去一个异常就是整个服务器进程退出（踩过一次: 延迟加载解析失败抛 0xC06D007E）
             try {
                 RandomTeleport::getInstance().tick();
+                PoolWarmer::getInstance().tick();   // 预落点后台预热（自带让路与限速）
                 NpcTeleport::getInstance().tick();   // 虚假实体"逐客户端看向自己"
                 TpaRally::getInstance().tick();
                 tpGuardTick();   // 记录各玩家维度变化（跨维度切换中禁止传送, 防幽灵状态刷物）
@@ -258,6 +261,13 @@ bool Mtps::enableInner() {
 
     // RTP 存档直读: 后台线程建 .ldb 索引（大存档十几秒, 不卡启用; 就绪前 RTP 回退生成路径）
     ArchiveScanner::getInstance().startAsync();
+
+    // 预落点池: 后台线程（再延后 45s）按世界种子用 cubiomes 补齐预落点。
+    // 只补缺口 —— 已落盘的点直接复用, 不再重新扫一遍。就绪前随机传送走原有四级数据源。
+    startLandingPoolService();
+
+    // 预热: 把池里的"待生成"点逐个在后台生成出来（限速 + 有玩家传送时让路，见 PoolWarmer.h）
+    PoolWarmer::getInstance().start();
 
     // PAPI 占位符: 走 MeowPAPI 的 C ABI 注册（不链接它的静态库）
     papi::registerAll();
@@ -597,6 +607,9 @@ bool Mtps::disable() {
     }
     // 关服兜底: 悬停中的随机传送玩家送回原点（防止高空位置被存档）
     RandomTeleport::getInstance().stopAll();
+    // 预落点池: 停后台补齐线程（必须在 stopAll 之后 —— 先停 RTP 查询再收池，避免并发读写）
+    stopLandingPoolService();
+    PoolWarmer::getInstance().stop();   // 撤回预热占用的常加载区域
     // 存档直读索引: 停后台线程 + 关闭文件句柄（必须在 stopAll 之后, 先停 RTP 查询再销毁 reader）
     ArchiveScanner::getInstance().shutdown();
     DataStore::getInstance().saveAll();

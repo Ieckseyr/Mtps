@@ -1,4 +1,5 @@
 ﻿#include "Config.h"
+#include "LandingPoolService.h"   // syncPoolRegionsFromPresets（配置变更 → 预落点池区域同步）
 
 #include <ll/api/io/Logger.h>
 #include <ll/api/mod/NativeMod.h>
@@ -76,8 +77,38 @@ json Config::defaultConfig() {
         },
         "randomTeleport": {
             "enabled": true, "cooldownSeconds": 120, "maxAttempts": 50,
-            "debug": false, "preferKnownLandings": false,
+            "debug": false, "preferKnownLandings": false, "landingHoldTicks": 40,
             "precompute": { "enabled": true, "maxLandings": 0 },
+            "biome": {
+                "enabled": true,
+                "source": "cubiomes",
+                "sampleY": 15,
+                "excludeBiomes": [ "ocean", "deep_ocean", "frozen_ocean", "deep_frozen_ocean",
+                    "warm_ocean", "lukewarm_ocean", "cold_ocean",
+                    "deep_warm_ocean", "deep_lukewarm_ocean", "deep_cold_ocean",
+                    "river", "frozen_river" ],
+                "neighborAgreeRadius": 2
+            },
+            "pool": {
+                "enabled": true,
+                "loadedTarget": 1000,
+                "unloadedTarget": 3000,
+                "bucketSize": 512,
+                "hitRadius": 500,
+                "minSeparation": 64,
+                "maxTriesPerPoint": 64,
+                "approxHeightMin": 63,
+                "replaceRatio": 0.5,
+                "rebuildOnRadiusChange": true,
+                "file": "landingpool.bin",
+                "warm": {
+                    "enabled": true,
+                    "startDelaySeconds": 90,
+                    "intervalSeconds": 30,
+                    "keepResident": 4,
+                    "onlyWhenIdle": true
+                }
+            },
             "dangerBlocks": [ "minecraft:lava","minecraft:flowing_lava","minecraft:water","minecraft:flowing_water",
                 "minecraft:fire","minecraft:soul_fire","minecraft:cactus","minecraft:sweet_berry_bush",
                 "minecraft:magma_block","minecraft:wither_rose","minecraft:powder_snow" ],
@@ -299,11 +330,54 @@ void Config::buildCaches() {
     mRandomMaxAttempts  = jint(rtp, "maxAttempts", 50);
     mRandomDebug        = jbool(rtp, "debug", false);
     mRandomPreferKnown  = jbool(rtp, "preferKnownLandings", false);
+    // 周围区块没加载完时最多再等多少拍（调小 = 传送更快，代价是落点周围可能先短暂空白）
+    mLandingHoldTicks   = std::max(5, std::min(200, jint(rtp, "landingHoldTicks", 40)));
 
     // 落点表预计算: 是否启用 + 预计算落点上限（chunk 数, 0 = 不限制）
     auto const& pre = subOf(rtp, "precompute");
     mLandPrecomputeEnabled = jbool(pre, "enabled", true);
     mLandPrecomputeMax     = std::max(0, jint(pre, "maxLandings", 0));
+
+    // 群系采样（cubiomes 按世界种子推算; 与 ZXDash 群系底图同源同切片）
+    auto const& bio = subOf(rtp, "biome");
+    mBiomeEnabled  = jbool(bio, "enabled", true);
+    mBiomeSource   = jstr(bio, "source", "cubiomes");
+    mBiomeSampleY  = jint(bio, "sampleY", 15);
+    mBiomeNeighborRadius = std::max(0, std::min(8, jint(bio, "neighborAgreeRadius", 2)));
+    mBiomeExclude.clear();
+    if (bio.contains("excludeBiomes") && bio["excludeBiomes"].is_array()) {
+        for (auto const& e : bio["excludeBiomes"]) {
+            if (e.is_string()) mBiomeExclude.push_back(e.get<std::string>());
+        }
+    }
+    if (mBiomeExclude.empty()) {
+        for (auto const& e : Config::defaultConfig()["randomTeleport"]["biome"]["excludeBiomes"]) {
+            if (e.is_string()) mBiomeExclude.push_back(e.get<std::string>());
+        }
+    }
+
+    // 预落点池: 已加载类/未加载类目标数量、命中半径、淘汰规则等
+    auto const& pl = subOf(rtp, "pool");
+    mPoolEnabled        = jbool(pl, "enabled", true);
+    mPoolLoadedTarget   = std::max(0, jint(pl, "loadedTarget", 1000));
+    mPoolUnloadedTarget = std::max(0, jint(pl, "unloadedTarget", 3000));
+    mPoolBucketSize     = std::max(16, jint(pl, "bucketSize", 512));
+    mPoolHitRadius      = std::max(0, jint(pl, "hitRadius", 500));
+    mPoolMinSeparation  = std::max(1, jint(pl, "minSeparation", 64));
+    mPoolMaxTries       = std::max(1, jint(pl, "maxTriesPerPoint", 64));
+    mPoolApproxHeightMin = jint(pl, "approxHeightMin", 63);
+    mPoolReplaceRatio   = std::min(1.0, std::max(0.0, pl.value("replaceRatio", 0.5)));
+    mPoolRebuildOnRadiusChange = jbool(pl, "rebuildOnRadiusChange", true);
+    mPoolFile           = jstr(pl, "file", "landingpool.bin");
+    if (mPoolFile.empty()) mPoolFile = "landingpool.bin";
+
+    // 预热（把池里的"待生成"点逐个在后台生成出来）
+    auto const& warm = subOf(pl, "warm");
+    mWarmEnabled            = jbool(warm, "enabled", true);
+    mWarmStartDelaySeconds  = std::max(5, std::min(3600, jint(warm, "startDelaySeconds", 90)));
+    mWarmIntervalSeconds    = std::max(1, std::min(3600, jint(warm, "intervalSeconds", 30)));
+    mWarmKeepResident       = std::max(0, std::min(32, jint(warm, "keepResident", 4)));
+    mWarmOnlyWhenIdle       = jbool(warm, "onlyWhenIdle", true);
 
     mBlockTpEnabled     = jbool(btp, "enabled", true);
     mBlockTpQuickAddItem           = jstr(quick, "item", "minecraft:nether_star");
@@ -323,6 +397,12 @@ void Config::buildCaches() {
     mDefaultRefuseAllWarpRequests = jbool(rules, "refuseAllWarpRequests", false);
     mLogToConsole               = jbool(log, "logToConsole", true);
     mBroadcastToGame            = jbool(log, "broadcastToGame", true);
+
+    // 配置变了就把随机的预设区域同步给预落点池（buildCaches 是所有配置变更的唯一汇聚点：
+    // load/reload/setPresets/菜单改配置都会走到这里）。区域变更只会打个"待重建"标记，
+    // 真正重算在后台做 —— 所以"保存一个 3000000 的大半径"不会卡住表单。
+    // 池未启用时这是个空操作。
+    syncPoolRegionsFromPresets();
 }
 
 bool Config::load() {
@@ -422,10 +502,36 @@ bool Config::migrateLegacy() {
         (*rtp)["preferKnownLandings"] = defaultConfig()["randomTeleport"]["preferKnownLandings"];
         changed                       = true;
     }
+    // 随机传送的 debug 开关：缺了也得补上 —— 不然配置里根本看不到这个键，
+    // 只能去改顶层 debug（两个开关任一为真都会输出，但 RTP 单独一行更细）
+    if (rtp != mConfig.end() && rtp->is_object() && !rtp->contains("landingHoldTicks")) {
+        (*rtp)["landingHoldTicks"] = defaultConfig()["randomTeleport"]["landingHoldTicks"];
+        changed                    = true;
+    }
+    if (rtp != mConfig.end() && rtp->is_object() && !rtp->contains("debug")) {
+        (*rtp)["debug"] = defaultConfig()["randomTeleport"]["debug"];
+        changed         = true;
+    }
     // 落点表预计算的开关与上限同理
     if (rtp != mConfig.end() && rtp->is_object() && !rtp->contains("precompute")) {
         (*rtp)["precompute"] = defaultConfig()["randomTeleport"]["precompute"];
         changed              = true;
+    }
+    // 群系采样与预落点池同理: 缺了功能照常（读的时候用默认值）, 但配置里看不见就改不成
+    if (rtp != mConfig.end() && rtp->is_object() && !rtp->contains("biome")) {
+        (*rtp)["biome"] = defaultConfig()["randomTeleport"]["biome"];
+        changed         = true;
+    }
+    if (rtp != mConfig.end() && rtp->is_object() && !rtp->contains("pool")) {
+        (*rtp)["pool"] = defaultConfig()["randomTeleport"]["pool"];
+        changed        = true;
+    }
+    // 预热是后加的：已有 pool 段的配置里不会自动长出 warm 子段 —— 缺了功能照常（读的时候用默认值），
+    // 但配置里看不见就调不了。与上面的 debug / pool 同一类问题。
+    if (rtp != mConfig.end() && rtp->is_object() && rtp->contains("pool")
+        && (*rtp)["pool"].is_object() && !(*rtp)["pool"].contains("warm")) {
+        (*rtp)["pool"]["warm"] = defaultConfig()["randomTeleport"]["pool"]["warm"];
+        changed                = true;
     }
     return changed;
 }

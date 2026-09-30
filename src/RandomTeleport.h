@@ -48,6 +48,9 @@ public:
     // 每 tick 推进（由主入口调用）
     void tick();
 
+    // 是否有玩家会话正在跑（预热器用它让路：玩家传送优先，别抢生成队列）
+    bool busy() const { return !mSessions.empty(); }
+
     // 停止全部会话（玩家全程在原地, 无需回退传送; 常加载区域一并移除）
     void stopAll();
 
@@ -60,6 +63,7 @@ private:
     // 传送成功后的"宽限期待撤区域"（会话已结束, 但区域还要留一会儿）
     struct GraceArea {
         std::string name;
+        std::string playerName;   // 自检用: 判断玩家是否还在附近（离线/跑远时区块卸载属正常）
         int         dim{-1};
         int64_t     removeAtTick{0};
         int         lcx{0}, lcz{0};   // 落点区块（自检: 撤区域后它是否仍被玩家视野持有）
@@ -67,6 +71,7 @@ private:
     };
     std::vector<GraceArea> mGraceAreas;
     int64_t                mTickCounter{0};
+    bool                   mSamplerWarmed{false};   // 群系采样器是否已在主线程预热（见 tick）
 
     // 传送后的"到达到位"核对（见 processArrivalChecks）
     struct ArrivalCheck {
@@ -82,6 +87,9 @@ private:
     enum class StepResult { Progress, Done, Waiting };
 
     void pickNewTarget(Session& s);                    // 选新随机落点（不传送玩家）
+    // 从"预落点池"抽一个候选点当落点（首选路径）。
+    // false = 池未就绪/为空/圆内无点 → 调用方走降级（原有四级数据源链路一行不改）。
+    bool tryPoolLanding(Session& s);
     // 取一个"存档里已知安全"的已生成地块当落点; false = 存档里没有符合条件的
     bool tryKnownLanding(Session& s);
     // 一次选点失败后的收尾: 名额内换点重随 → 最后试一次已知安全点 → 仍不行才放弃
@@ -95,11 +103,12 @@ private:
     StepResult stepExpand(Session& s, Level& level, Player& p, Dimension& dim);
     void finishTeleport(Session& s, Player& p, bool success, SafePos const* pos);
 
-    static void ensureTickingArea(Session& s, Level& level, int blockX, int blockZ, int radiusChunks);
+    // 控制常加载区域（非静态: 换点时要走宽限期队列延后撤旧区域, 见 ensureTickingArea 注释）
+    void ensureTickingArea(Session& s, Level& level, int blockX, int blockZ, int radiusChunks);
     void cleanupSessionArea(Session& s);   // 非静态: 传送成功后要把区域挂到宽限期队列
 
-    void scheduleAreaRemoval(std::string const& name, int dim, int delayTicks,
-                             int landingCX, int landingCZ);
+    void scheduleAreaRemoval(std::string const& playerName, std::string const& name, int dim,
+                             int delayTicks, int landingCX, int landingCZ);
     void processGraceAreas();                          // 宽限期到 → 撤销区域
     void processArrivalChecks();                       // 传送后核对客户端的区块发布区域
     static bool areaCoversLanding(Session const& s, SafePos const& p);  // 落点是否在区域覆盖内

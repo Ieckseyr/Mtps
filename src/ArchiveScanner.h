@@ -36,6 +36,9 @@ public:
     // 该维度表里的 chunk 数（0 = 存档里这一维度没生成过东西）
     size_t landingCountForDim(int dim) const;
 
+    // 该维度落点表的快照（拷一份，免得调用方和 shutdown 的生命周期纠缠）
+    std::vector<BedrockLevelReader::Landing> snapshotLandings(int dim);
+
     // 抽一个"半径内且已有安全落点"的已生成 chunk（零 IO, 拒绝采样）
     bool pickSafeLandingInRange(int originBX, int originBZ, int radiusBlocks, int dim,
                                 uint64_t seed, BedrockLevelReader::Landing& out, int tries = 128);

@@ -424,10 +424,12 @@ bool BedrockLevelReader::open() {
     mFiles.resize(files.size());
     mStats.filesTotal = files.size();
 
-    // 并行扫描：每线程独立文件句柄（避免共享 HANDLE 的 seek 竞争）
+    // 并行扫描：每线程独立文件句柄（避免共享 HANDLE 的 seek 竞争）。
+    // 并行度压到 2：解压整份 .ldb 是纯 CPU+磁盘的重活，开 6 线程时实测把 MSPT 顶到 100ms 以上
+    // （和玩家传送撞在一起尤其明显）。后台活慢点没关系，但不能和主线程抢机器。
     unsigned nThreads = std::thread::hardware_concurrency();
     if (nThreads == 0) nThreads = 2;
-    if (nThreads > 6) nThreads = 6;   // BDS 与扫描同机，留出余量
+    if (nThreads > 2) nThreads = 2;
     if (files.size() < nThreads) nThreads = (unsigned)files.size();
 
     std::vector<std::vector<ScanResult>> results(files.size()); // 每文件一个（可能为空）
@@ -441,6 +443,9 @@ bool BedrockLevelReader::open() {
             size_t fi = nextFile.fetch_add(1);
             if (fi >= files.size()) break;
 
+            // 文件之间让出一点 CPU，把突发摊平
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (cancelled()) break;
             void* h = openLdbFile(files[fi].name);
             if (!h) continue;
             uint64_t fsize = 0;
@@ -1087,6 +1092,7 @@ BedrockLevelReader::ChunkSurface BedrockLevelReader::scanChunkSurface(int cx, in
         uint16_t flowingWaterIdx = 0xFFFF;
         uint16_t liqWaterIdx = 0xFFFF;
         uint16_t liqFlowingWaterIdx = 0xFFFF;
+        std::vector<uint8_t> isLeaf;   // 树叶 palette 下标（树冠不算地表）
     };
 
     auto buildFlags = [](const SubchunkData& sd) {
@@ -1101,6 +1107,11 @@ BedrockLevelReader::ChunkSurface BedrockLevelReader::scanChunkSurface(int cx, in
             const std::string& n = sd.liquidPalette[i];
             if (n == "water") f.liqWaterIdx = (uint16_t)i;
             else if (n == "flowing_water") f.liqFlowingWaterIdx = (uint16_t)i;
+        }
+        // 树叶下标的位图（树冠不算地表, 见 SurfaceRules.h），逐格扫描时只查一次数组
+        f.isLeaf.assign(sd.palette.size(), 0);
+        for (size_t i = 0; i < sd.palette.size(); i++) {
+            if (mtps::isLeafBlockName(sd.palette[i])) f.isLeaf[i] = 1;
         }
         return f;
     };
@@ -1148,6 +1159,8 @@ BedrockLevelReader::ChunkSurface BedrockLevelReader::scanChunkSurface(int cx, in
                         waterDepth++;
                         continue;
                     }
+                    // 树冠不算地表: 穿过树叶继续往下找地面（与内存扫描同一规则）
+                    if (blockIdx < f.isLeaf.size() && f.isLeaf[blockIdx]) continue;
 
                     // 找到第一个实体方块
                     int y = worldYBase + localY;

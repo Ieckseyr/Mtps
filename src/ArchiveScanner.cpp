@@ -6,6 +6,9 @@
 #include "RandomTeleportInternal.h"   // RTP_LANDING_DEFER_SECONDS
 
 #include <ll/api/mod/NativeMod.h>
+#include <ll/api/service/Bedrock.h>
+#include <mc/world/actor/player/Player.h>
+#include <mc/world/level/Level.h>
 #include <ll/api/io/Logger.h>
 
 #include <algorithm>
@@ -89,13 +92,17 @@ bool ArchiveScanner::tryLoadLandingsCache(std::string const& dbPath) {
 
     std::ifstream cf(cache + ".meta");
     if (!cf.is_open()) return false;
-    std::string cachedFp, cachedDb, cachedMax;
+    std::string cachedFp, cachedDb, cachedMax, cachedRules;
     std::getline(cf, cachedFp);
     std::getline(cf, cachedDb);
     std::getline(cf, cachedMax);
-    // 上限也一起比: 改了 maxLandings 就该重算（否则缓存永远是旧的规模）
+    std::getline(cf, cachedRules);
+    // 上限也一起比（改了 maxLandings 就该重算）；规则版本也比——取面规则变了（比如"树冠不算
+    // 地表"），表里的落点就都过时了，光看 .ldb 指纹发现不了。老 meta 没有第 4 行会读到空串，
+    // 与当前版本不等 ⇒ 自动重算，正好是要的。
     if (cachedFp != fp || cachedDb != dbPath
-        || cachedMax != std::to_string(Config::getInstance().landingPrecomputeMax())) {
+        || cachedMax != std::to_string(Config::getInstance().landingPrecomputeMax())
+        || cachedRules != kLandingRulesVersion) {
         return false;
     }
 
@@ -147,7 +154,43 @@ void ArchiveScanner::startAsync() {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         if (mStopping.load(std::memory_order_acquire)) return;
-        scannerLogger().info("[RTP][落点表] 开服已稳定, 开始重建落点表（世界改动后一次性重算）");
+
+        // 等没人在线再做。重建要解压整份 .ldb（实测 CPU 满载 3 秒以上），和玩家传送撞上时会把
+        // MSPT 顶到 100ms+，而这活什么时候做都行：有人在就每 5 秒看一眼、最多等 30 分钟；
+        // 到期还没空服就按限流模式照做（见 BedrockLevelReader::open 里的并行度说明）。
+        {
+            bool waitedLogged = false;
+            auto const waitStart = std::chrono::steady_clock::now();
+            while (!mStopping.load(std::memory_order_acquire)) {
+                bool anyone = false;
+                if (auto lvl = ll::service::getLevel()) {
+                    try {
+                        // 只看"有没有人在线"，找到第一个就停（工程里数在线玩家都走 forEachPlayer，
+                        // getPlayerList() 会连离线玩家一起带出来）
+                        lvl->forEachPlayer([&](Player&) -> bool { anyone = true; return false; });
+                    } catch (...) {}
+                }
+                if (!anyone) break;
+                auto const waitedS = std::chrono::duration_cast<std::chrono::seconds>(
+                                         std::chrono::steady_clock::now() - waitStart)
+                                         .count();
+                if (waitedS >= 1800) {   // 30 分钟兜底: 一直有人也得重建
+                    scannerLogger().info("[RTP][落点表] 等空服已 {} 分钟仍有玩家在线, "
+                                         "按限流模式开始重建（并行度 2 + 逐块让出 CPU）", waitedS / 60);
+                    break;
+                }
+                if (!waitedLogged) {
+                    waitedLogged = true;
+                    scannerLogger().info("[RTP][落点表] 有玩家在线, 重建推迟到空服再做"
+                                         "（落点表先用旧缓存, 不影响传送, 最多等 30 分钟）");
+                }
+                for (int i = 0; i < 50 && !mStopping.load(std::memory_order_acquire); i++) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+        }
+        if (mStopping.load(std::memory_order_acquire)) return;
+        scannerLogger().info("[RTP][落点表] 开始重建落点表（世界改动后一次性重算, 已限流）");
 
         auto reader = mReader.get();
         if (reader == nullptr) return;
@@ -207,6 +250,7 @@ void ArchiveScanner::startAsync() {
                 cf << ldbFingerprint() << std::endl;
                 cf << dbPath << std::endl;
                 cf << Config::getInstance().landingPrecomputeMax() << std::endl;
+                cf << kLandingRulesVersion << std::endl;   // 取面规则版本（变了就重算）
                 if (reader->saveLandingsCache(cache)) {
                     scannerLogger().info("[RTP][落点表] 已存盘: {}", cache);
                 }
@@ -258,6 +302,17 @@ bool ArchiveScanner::lookupLanding(int cx, int cz, int dim, BedrockLevelReader::
 
 size_t ArchiveScanner::landingCountForDim(int dim) const {
     return (ready() && mReader) ? mReader->landingCountForDim(dim) : 0;
+}
+
+std::vector<BedrockLevelReader::Landing> ArchiveScanner::snapshotLandings(int dim) {
+    if (!ready() || !mReader) return {};
+    std::lock_guard<std::mutex> lk(mMutex);
+    if (!mReader) return {};
+    try {
+        return mReader->landings(dim);   // 拷贝
+    } catch (...) {
+        return {};
+    }
 }
 
 bool ArchiveScanner::pickSafeLandingInRange(int originBX, int originBZ, int radiusBlocks, int dim,

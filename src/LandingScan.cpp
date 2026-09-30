@@ -5,6 +5,8 @@
 #include "BedrockLevelReader.h"
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <cstring>
 #include <fstream>
 #include <climits>
@@ -62,7 +64,7 @@ void BedrockLevelReader::decodeSubchunkColumns(const uint8_t* data, size_t size,
     thread_local std::vector<uint8_t>  tVerdict;
     thread_local std::vector<uint64_t> tLiqBits;
 
-    // palette 逐项判定: 1=可用 2=危险 3=空名（视为无列, 与 findSafeInSurface 的 name.empty() 一致）
+    // palette 逐项判定: 1=可用 2=危险 3=空名(视为无列) 4=树叶(对找地表透明, 见 SurfaceRules.h)
     tVerdict.assign(layer0.palette.size(), 0);
     uint16_t airIdx = 0xFFFF, waterIdx = 0xFFFF, flowIdx = 0xFFFF;
     for (size_t i = 0; i < layer0.palette.size(); i++) {
@@ -70,7 +72,10 @@ void BedrockLevelReader::decodeSubchunkColumns(const uint8_t* data, size_t size,
         if (n == "air" || n.empty()) airIdx = (uint16_t)i;
         else if (n == "water") waterIdx = (uint16_t)i;
         else if (n == "flowing_water") flowIdx = (uint16_t)i;
-        tVerdict[i] = n.empty() ? 3 : (dangerShort.count(n) ? 2 : 1);
+        tVerdict[i] = n.empty()                ? 3
+                    : mtps::isLeafBlockName(n)  ? 4
+                    : dangerShort.count(n)     ? 2
+                                               : 1;
     }
 
     // 液体层"是水"位图（4096 位, 按紧凑索引 i = (x<<8)|(z<<4)|y）
@@ -105,10 +110,11 @@ void BedrockLevelReader::decodeSubchunkColumns(const uint8_t* data, size_t size,
     if (layer0.bitsPerIndex == 0 || layer0.words.empty()) {
         bool const allAir   = (airIdx == 0);
         bool const allWater = (waterIdx == 0) || (flowIdx == 0);
+        bool const allLeaf  = (tVerdict.empty() ? 0 : tVerdict[0]) == 4;   // 整块树冠 = 透明
         bool const anyLiq   = (tLiqBits[0] != 0);
         uint8_t const v     = tVerdict.empty() ? 3 : tVerdict[0];
         for (int c = 0; c < 256; c++) {
-            if (allAir || allWater) {
+            if (allAir || allWater || allLeaf) {
                 out[c].topSolidY  = -1;
                 out[c].waterAbove = (uint16_t)((allWater || anyLiq) ? 16 : 0);
             } else {
@@ -145,6 +151,8 @@ void BedrockLevelReader::decodeSubchunkColumns(const uint8_t* data, size_t size,
                 if (y > pr.topSolidY) pr.waterAbove++;
                 continue;
             }
+            // 树冠不算地表: 跳过它继续往下（不参与 topSolid 判定, 也不算水）
+            if (idx < tVerdict.size() && tVerdict[idx] == 4) continue;
             // 实体方块: 比已记录的更高则替换并清零其上水计数
             if (y > pr.topSolidY) {
                 pr.topSolidY  = (int16_t)y;
@@ -295,6 +303,10 @@ bool BedrockLevelReader::buildLandings(std::vector<std::string> const& dangerSho
             ++builtTotal;
 
             doneChunks++;
+            // 每 256 个 chunk 让出 20ms：整轮不停会让 MSPT 抖起来，这点延迟（约 150ms）换得划算
+            if ((doneChunks & 0xFF) == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
             if (onProgress && (doneChunks & 0xFFF) == 0) onProgress(doneChunks, totalChunks);
 
             if (maxChunks > 0 && builtTotal >= maxChunks) {   // 到上限: 停在这里
@@ -395,6 +407,13 @@ size_t BedrockLevelReader::landingCountForDim(int dim) const {
     if (dim < 0 || dim > 2) return 0;
     if (!mLandingsReady.load(std::memory_order_acquire)) return 0;
     return mLandings[dim].size();
+}
+
+std::vector<BedrockLevelReader::Landing> const& BedrockLevelReader::landings(int dim) const {
+    static std::vector<Landing> const kEmpty;
+    if (dim < 0 || dim > 2) return kEmpty;
+    if (!mLandingsReady.load(std::memory_order_acquire)) return kEmpty;
+    return mLandings[dim];
 }
 
 // splitmix64: 把调用方给的种子摊开, 免得连续种子抽出相邻下标

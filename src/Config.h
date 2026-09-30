@@ -97,6 +97,49 @@ public:
     std::vector<std::string> const& dangerShortBlocks() const;
     std::vector<RandomPreset> const& randomPresets() const;
 
+    // 群系采样（cubiomes 按种子推算，与 ZXDash 底图同库同种子同切片）
+    bool        biomeEnabled() const { return mBiomeEnabled; }
+    std::string const& biomeSource() const { return mBiomeSource; }
+    int         biomeSampleY() const { return mBiomeSampleY; }
+    // 被排除的群系名（海洋/河流等），池生成候选点时排除
+    std::vector<std::string> const& biomeExcludeBiomes() const { return mBiomeExclude; }
+    // 邻域半径（群系格，1 格=4 方块）：邻域里出现被排除群系就丢掉该候选点
+    int         biomeNeighborRadius() const { return mBiomeNeighborRadius; }
+
+    // 预落点池（见 docs/MTPS随机传送预落点优化方案.md）
+    bool        landingPoolEnabled() const { return mPoolEnabled; }
+    // 已加载类目标数（存档内，传送只需载入区块）
+    int         landingPoolLoadedTarget() const { return mPoolLoadedTarget; }
+    // 未加载类目标数（cubiomes 推算，传送要生成——唯一允许的等待）
+    int         landingPoolUnloadedTarget() const { return mPoolUnloadedTarget; }
+    int         landingPoolBucketSize() const { return mPoolBucketSize; }
+    // 命中半径 / 抖动半径（格）
+    int         landingPoolHitRadius() const { return mPoolHitRadius; }
+    // 池内点最小间距（格）: 防扎堆, 也决定半径能容纳的点数上限
+    int         landingPoolMinSeparation() const { return mPoolMinSeparation; }
+    int         landingPoolMaxTries() const { return mPoolMaxTries; }
+    // 近似高度下限（低于此值的候选点丢弃; ≈海平面）
+    int         landingPoolApproxHeightMin() const { return mPoolApproxHeightMin; }
+    // 半径变更时替换掉旧未加载点的比例（0.5 = 保留一半旧点, 一半换成新区域的点）
+    double      landingPoolReplaceRatio() const { return mPoolReplaceRatio; }
+    bool        landingPoolRebuildOnRadiusChange() const { return mPoolRebuildOnRadiusChange; }
+    std::string const& landingPoolFile() const { return mPoolFile; }
+
+    // 预热（把池里的"待生成"点逐个在后台生成出来，见 PoolWarmer）
+    bool landingPoolWarmEnabled() const { return mWarmEnabled; }
+    // 两次预热之间的间隔（秒）: 一次预热 = 生成 25 个区块（r=2 的常加载区域）
+    int  landingPoolWarmIntervalSeconds() const { return mWarmIntervalSeconds; }
+    // 开服后等多少秒才开始预热（把开服负载让过去）
+    int  landingPoolWarmStartDelaySeconds() const { return mWarmStartDelaySeconds; }
+    // 预热好之后保留为"常驻"（区块留在内存里 → 抽到它瞬时传送）的点数; 0 = 全部只求"已生成"
+    int  landingPoolWarmKeepResident() const { return mWarmKeepResident; }
+    // 有玩家正在传送时让路（不抢生成队列）
+    bool landingPoolWarmOnlyWhenIdle() const { return mWarmOnlyWhenIdle; }
+
+    // 落点就绪后，"周围 (2r+1)^2 区块还没全部加载完"时最多再等多少拍（tick）。
+    // 超了就照样传送（客户端会在随后几百毫秒里补齐），所以调小=更快、但落点周围可能先短暂空白。
+    int landingHoldTicks() const { return mLandingHoldTicks; }
+
     // 方块传送点
     bool               blockTpEnabled() const { return mBlockTpEnabled; }
     std::string const& blockTpQuickAddItem() const { return mBlockTpQuickAddItem; }
@@ -192,6 +235,28 @@ private:
     bool mRandomPreferKnown{false};
     bool mLandPrecomputeEnabled{true};
     int  mLandPrecomputeMax{0};
+    bool mBiomeEnabled{true};
+    std::string mBiomeSource{"cubiomes"};
+    int  mBiomeSampleY{15};
+    std::vector<std::string> mBiomeExclude;
+    int  mBiomeNeighborRadius{2};
+    bool mPoolEnabled{true};
+    int  mPoolLoadedTarget{1000};
+    int  mPoolUnloadedTarget{3000};
+    int  mPoolBucketSize{512};
+    int  mPoolHitRadius{500};
+    int  mPoolMinSeparation{64};
+    int  mPoolMaxTries{64};
+    int  mPoolApproxHeightMin{63};
+    double mPoolReplaceRatio{0.5};
+    bool mPoolRebuildOnRadiusChange{true};
+    std::string mPoolFile{"landingpool.bin"};
+    bool mWarmEnabled{true};
+    int  mWarmIntervalSeconds{30};
+    int  mWarmStartDelaySeconds{90};
+    int  mWarmKeepResident{4};
+    bool mWarmOnlyWhenIdle{true};
+    int  mLandingHoldTicks{40};
     bool mBlockTpEnabled{true};
     std::string mBlockTpQuickAddItem{"minecraft:nether_star"};
     bool mBlockTpQuickAddRequireSneak{true};

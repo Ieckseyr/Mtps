@@ -43,6 +43,9 @@ inline constexpr int RTP_TICK_BUDGET_MS        = 2;     // 每 tick 总时间预
 inline constexpr int RTP_TICK_WARN_MS          = 5;     // 单 tick 超过这个耗时就在 debug 日志里报一行
 inline constexpr int RTP_TABLE_CHUNKS_PER_TICK = 512;   // 每 tick 最多走落点表（零 IO）的区块数
 inline constexpr int RTP_AREA_GRACE_TICKS      = 200;   // 传送成功后区域的宽限保留时长（tick）
+// 换点后旧区域的交接时长: 新区域先挂上、旧区域再延后这么多 tick 撤。同 tick 撤会让新旧
+// 覆盖范围的重叠部分失去引用, 引擎会把它卸掉再加载（实测表现为等待突然卡在中间状态）。
+inline constexpr int RTP_AREA_HANDOVER_TICKS   = 40;
 inline constexpr int RTP_SPAWN_WAIT_TICKS      = 200;   // 出生流程未走完时的等待上限（tick）
 inline constexpr int RTP_LANDING_HOLD_TICKS    = 40;    // 落点周围还没加载完时, 最多再等多少拍
 inline constexpr int RTP_PUBLISH_RECHECK_TICKS = 2;     // 传送到位后核对客户端发布区域的间隔（tick）
@@ -67,17 +70,21 @@ char const* chunkStateName(ChunkState st);
 ChunkState  chunkStateAt(Dimension& dim, int blockX, int blockZ);
 bool        isChunkReady(Dimension& dim, int blockX, int blockZ);
 
+// hintY 的"没有提示"哨兵。不能用 0: 主世界 y=0 是合法高度, 会被当成有效提示,
+// 于是从 y=0 附近往下找, 可能落到峡谷/洞穴里的台子上。
+inline constexpr int RTP_NO_HINT = INT_MIN;
+
 // 地表扫描结果
 struct ScanResult {
     bool        found{false};
     bool        openWater{false};   // 深水或整列虚空, 纯海域快筛用
     SafePos     pos{};
+    // 这列的"地表高度"（即使没找到站位也会填）: 调用方拿它当下一列的提示（只加速, 不改变结果）。
+    // 以前没有这个字段, 调用方只能从 pos.y 取, 而 pos 只有 found 时才有效 —— 提示机制形同虚设。
+    int         surfaceY{RTP_NO_HINT};
     std::string reason;
 };
 
-// hintY 的"没有提示"哨兵。不能用 0: 主世界 y=0 是合法高度, 会被当成有效提示,
-// 于是从 y=0 附近往下找, 可能落到峡谷/洞穴里的台子上。
-inline constexpr int RTP_NO_HINT = INT_MIN;
 
 // 逐列找安全落点（内存路径）。hintY 是上一列的地表高度, 用来省掉粗扫。
 // 提示只是加速: 试不中就走完整流程。命中时给出的是"符合安全条件的站立位",
